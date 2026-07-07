@@ -378,10 +378,18 @@ function installClaude(ctx) {
   } else if (useCli) {
     let allOk = true;
     for (const [name, s] of Object.entries(servers)) {
-      const r = child_process.spawnSync('claude', ['mcp', 'add', name, '--', s.command, ...s.args], { stdio: 'inherit' });
-      if ((r.status || 0) !== 0) { allOk = false; warn(`  claude mcp add ${name} failed`); }
+      // --scope user: register globally so the server is available in EVERY
+      // project, not just the install-time directory (claude mcp add defaults to
+      // the per-directory "local" scope). Capture output so an idempotent
+      // "already exists" is treated as success, not a failure.
+      const r = child_process.spawnSync('claude', ['mcp', 'add', '--scope', 'user', name, '--', s.command, ...s.args], { encoding: 'utf8' });
+      const out = `${r.stdout || ''}${r.stderr || ''}`;
+      if ((r.status || 0) === 0) continue;
+      if (/already exists/i.test(out)) { note(`  claude MCP ${name} already registered`); continue; }
+      allOk = false;
+      warn(`  claude mcp add ${name} failed: ${(out.trim().split('\n')[0] || '').slice(0, 120)}`);
     }
-    if (allOk) ok(`  [2/3] MCP registered via 'claude mcp add': ${serverNames.join(', ')}`);
+    if (allOk) ok(`  [2/3] MCP registered via 'claude mcp add --scope user': ${serverNames.join(', ')}`);
   } else {
     const cfg = readSettings(mcpPath);
     if (cfg === null) { warn(`  ${mcpPath} unparseable — skipping MCP registration`); results.failed.push(['claude-mcp', 'mcp file unparseable']); }
@@ -672,10 +680,10 @@ function uninstall(ctx) {
     if (stripped) ok(text === '' ? `  removed ${claudeMd}` : `  stripped Signal block from ${claudeMd}`);
   }
 
-  // 2. MCP servers.
+  // 2. MCP servers. Remove at --scope user to match the install scope.
   if (useCli) {
     for (const name of ['eap-runtime', 'eap-context']) {
-      if (!opts.dryRun) child_process.spawnSync('claude', ['mcp', 'remove', name], { stdio: 'ignore' });
+      if (!opts.dryRun) child_process.spawnSync('claude', ['mcp', 'remove', '--scope', 'user', name], { stdio: 'ignore' });
     }
     ok('  removed MCP servers via `claude mcp remove`');
   } else if (fs.existsSync(mcpPath)) {
