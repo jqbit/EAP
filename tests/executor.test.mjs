@@ -2,6 +2,9 @@
 // Run: node --test tests/executor.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { executeScript, checkNetworkPolicy } from '../layers/eap-runtime/src/executor.mjs';
 import { RuntimeStore } from '../layers/eap-runtime/src/store.mjs';
 
@@ -111,6 +114,16 @@ test('wall-clock timeout kills the child', async () => {
   assert.equal(r.timedOut, true);
 });
 
+test('huge timeoutMs is clamped, not coerced to 1ms', async () => {
+  // Regression (Fix 6): Node's setTimeout silently coerces a delay > 2**31-1 to
+  // 1ms, which would SIGKILL even a trivial job before the interpreter starts.
+  // The effective timeout is clamped to [1, MAX_TIMEOUT_MS], so a huge request
+  // runs to completion instead of timing out.
+  const r = await executeScript('print(1)', { language: 'python3', timeoutMs: 2 ** 40 });
+  assert.equal(r.ok, true);
+  assert.equal(r.timedOut, false);
+});
+
 test('output cap truncates runaway stdout and flags it', async () => {
   const r = await executeScript('print("x" * 100000)', {
     language: 'python3',
@@ -118,4 +131,33 @@ test('output cap truncates runaway stdout and flags it', async () => {
   });
   assert.equal(r.stdoutTruncated, true);
   assert.ok(Buffer.byteLength(r.output) <= 1000);
+});
+
+test('timeout reaps the whole process tree (no orphaned grandchild holds the pipe)', async (t) => {
+  // Regression: killing only the direct child leaves a grandchild that
+  // inherited the stdout pipe running — it blocks 'close' AND survives as an
+  // orphan. The fix runs the child as a process-group leader and SIGKILLs the
+  // group. POSIX-only (Windows has no process groups; it uses child.kill).
+  if (process.platform === 'win32') { t.skip('POSIX process-group semantics'); return; }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'eap-tree-'));
+  const pidFile = path.join(dir, 'grandchild.pid');
+  const script = [
+    'import subprocess, sys, time',
+    'p = subprocess.Popen(["sleep", "30"], stdout=sys.stdout)',
+    `open(${JSON.stringify(pidFile)}, "w").write(str(p.pid))`,
+    'sys.stdout.flush()',
+    'time.sleep(30)',
+  ].join('\n');
+  const r = await executeScript(script, { language: 'python3', timeoutMs: 800 });
+  assert.equal(r.timedOut, true);
+  const gpid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
+  assert.ok(Number.isInteger(gpid) && gpid > 0, 'grandchild pid recorded');
+  // Poll: the grandchild must be gone (SIGKILLed along with its group).
+  let alive = true;
+  for (let i = 0; i < 30; i++) {
+    try { process.kill(gpid, 0); } catch { alive = false; break; }
+    await new Promise((res) => setTimeout(res, 100));
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+  assert.equal(alive, false, 'grandchild survived the timeout — process tree not reaped');
 });

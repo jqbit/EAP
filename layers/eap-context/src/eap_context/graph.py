@@ -110,16 +110,35 @@ class SymbolGraph:
 # ---------------------------------------------------------------------------
 
 
+def _within(root_real: str, path_real: str) -> bool:
+    """True if *path_real* is *root_real* itself or nested beneath it."""
+    if path_real == root_real:
+        return True
+    return path_real.startswith(root_real + os.sep)
+
+
 def iter_source_files(root: str, ignore=DEFAULT_IGNORE):
-    """Yield (abspath, relpath) for supported source files under root."""
+    """Yield (abspath, relpath) for supported source files under root.
+
+    Symlinks are not followed: a symlinked directory is not descended into and
+    a symlinked file is skipped, so out-of-tree source can never be indexed
+    under an in-tree path. A realpath containment check backstops both.
+    """
     root = os.path.abspath(root)
+    root_real = os.path.realpath(root)
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(
-            d for d in dirnames if d not in ignore and not d.startswith(".")
+            d for d in dirnames
+            if d not in ignore and not d.startswith(".")
+            and not os.path.islink(os.path.join(dirpath, d))
         )
         for fname in sorted(filenames):
             if os.path.splitext(fname)[1].lower() in extract.CODE_EXTENSIONS:
                 ap = os.path.join(dirpath, fname)
+                if os.path.islink(ap):
+                    continue  # symlink may point outside the tree
+                if not _within(root_real, os.path.realpath(ap)):
+                    continue  # backstop: resolved target escaped the root
                 yield ap, os.path.relpath(ap, root).replace(os.sep, "/")
 
 
@@ -216,23 +235,108 @@ def save(g: SymbolGraph, path: str) -> str:
     return path
 
 
+class CacheFormatError(ValueError):
+    """A graph cache is structurally invalid, wrong-shaped, or unsafe.
+
+    Subclasses ValueError so ``load_or_build`` treats it as a corrupt cache and
+    rebuilds from source rather than crashing or trusting the file.
+    """
+
+
+def _is_safe_relpath(p) -> bool:
+    """True only for a plain in-tree relative path (no absolute, no ``..``).
+
+    A cache is untrusted input: a node whose ``file`` is absolute (``/etc/x``,
+    ``C:\\x``, ``//host/share``) or contains a ``..`` component would hand the
+    agent an attacker-chosen file:line pointer outside the indexed tree.
+    """
+    if not isinstance(p, str) or not p:
+        return False
+    if _has_control_char(p):
+        return False  # a newline in `file` forges a second pointer line
+    s = p.replace("\\", "/")
+    if s.startswith("/") or s.startswith("//") or (len(s) >= 2 and s[1] == ":"):
+        return False  # posix-absolute, UNC, or windows drive
+    return all(seg != ".." for seg in s.split("/"))
+
+
+def _has_control_char(s: str) -> bool:
+    return any(ord(c) < 0x20 or ord(c) == 0x7f for c in s)
+
+
+def _check_str_field(v, what: str) -> str:
+    """Validate a cache string field that is echoed into pointer / neighbor /
+    god-node output. It must be a plain string with no control characters —
+    otherwise a poisoned cache can splice a newline into ``name``/``kind``/
+    ``relation`` and forge an extra, attacker-chosen output line (an out-of-tree
+    ``file:line`` pointer). ``build()`` only ever emits identifier- and
+    relation-class strings, so this rejects no legitimately-built cache.
+    """
+    if not isinstance(v, str):
+        raise CacheFormatError(f"{what} must be a string: {v!r}")
+    if _has_control_char(v):
+        raise CacheFormatError(f"{what} contains control characters: {v!r}")
+    return v
+
+
 def load(path: str) -> SymbolGraph:
     with open(path, encoding="utf-8") as fh:
         data = json.load(fh)
+    if not isinstance(data, dict):
+        raise CacheFormatError("graph cache must be a JSON object")
+    nodes = data.get("nodes", [])
+    links = data.get("links", [])
+    if not isinstance(nodes, list) or not isinstance(links, list):
+        raise CacheFormatError("graph cache 'nodes'/'links' must be arrays")
+    meta = data.get("meta", {})
     g = SymbolGraph()
-    g.meta = data.get("meta", {})
-    for node in data.get("nodes", []):
-        nid = node["id"]
-        g.nodes[nid] = {"name": node["name"], "kind": node["kind"],
-                        "file": node["file"], "line": node["line"]}
+    g.meta = meta if isinstance(meta, dict) else {}
+    for node in nodes:
+        if not isinstance(node, dict):
+            raise CacheFormatError("each node must be an object")
+        try:
+            nid, name, kind = node["id"], node["name"], node["kind"]
+            file, line = node["file"], node["line"]
+        except (KeyError, TypeError) as exc:
+            raise CacheFormatError(f"node missing field: {exc}") from exc
+        if not isinstance(nid, str):
+            raise CacheFormatError("node id must be a string")
+        if not _is_safe_relpath(file):
+            raise CacheFormatError(f"unsafe node file path: {file!r}")
+        # `line` is echoed verbatim into pointer() as f"{file}:{line}"; an
+        # attacker-controlled non-int (e.g. "1\n/etc/passwd:1") would forge a
+        # pointer. build() only ever emits line >= 1, so this rejects no valid
+        # cache. bool is an int subclass — exclude it explicitly.
+        if not isinstance(line, int) or isinstance(line, bool) or line < 1:
+            raise CacheFormatError(f"node line must be a positive integer: {line!r}")
+        # name/kind reach pointer/neighbor/god-node output verbatim — validate
+        # them the same way as file/line so a newline can't forge an extra line.
+        _check_str_field(name, "node name")
+        _check_str_field(kind, "node kind")
+        g.nodes[nid] = {"name": name, "kind": kind, "file": file, "line": line}
         g.out.setdefault(nid, [])
         g.inc.setdefault(nid, [])
-    for link in data.get("links", []):
+    for link in links:
+        if not isinstance(link, dict):
+            raise CacheFormatError("each link must be an object")
+        try:
+            source, target, relation = link["source"], link["target"], link["relation"]
+        except (KeyError, TypeError) as exc:
+            raise CacheFormatError(f"link missing field: {exc}") from exc
+        # source/target/relation/provenance all reach neighbor/query output.
+        # Default a missing provenance so neighbors() can't KeyError, and reject
+        # control chars so no field can splice a forged output line.
+        provenance = link.get("provenance", "")
+        _check_str_field(source, "link source")
+        _check_str_field(target, "link target")
+        _check_str_field(relation, "link relation")
+        _check_str_field(provenance, "link provenance")
+        link["provenance"] = provenance
         idx = len(g.edges)
         g.edges.append(link)
-        g._edge_seen.add((link["source"], link["target"], link["relation"]))
-        g.out.setdefault(link["source"], []).append(idx)
-        g.inc.setdefault(link["target"], []).append(idx)
+        g._edge_seen.add((source, target, relation))
+        g.out.setdefault(source, []).append(idx)
+        g.inc.setdefault(target, []).append(idx)
     return g
 
 
@@ -247,7 +351,11 @@ def load_or_build(root: str, rebuild: bool = False) -> SymbolGraph:
     if not rebuild and os.path.isfile(path):
         try:
             return load(path)
-        except (json.JSONDecodeError, KeyError, OSError):
-            pass  # stale/corrupt cache: rebuild below
+        except Exception:
+            # A cache is untrusted input and build_and_save (below, outside this
+            # try) is an unconditional rebuild fallback, so ANY load failure —
+            # stale/corrupt/wrong-shaped/unsafe, or a RecursionError from a
+            # deeply-nested JSON payload — is caught and rebuilt from source.
+            pass
     g, _ = build_and_save(root)
     return g

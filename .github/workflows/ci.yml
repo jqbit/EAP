@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # EAP-Runtime uses node:sqlite (DatabaseSync), stable on Node 22.5+ and 24.
+        node-version: [22, 24]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: ${{ matrix.node-version }}
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Node tests (Runtime + Context MCP + installer + TUI)
+        run: node --test tests/*.test.mjs
+
+      - name: Context engine tests (Python stdlib)
+        run: python3 tests/test_context_engine.py
+
+      - name: Benchmark harness (honest, reproducible)
+        run: python3 bench/run.py
+
+      - name: Clean-room contamination guard (no ELv2 source)
+        run: bash scripts/check-contamination.sh
+
+      - name: Installer smoke (list + dry-run, writes nothing)
+        run: |
+          node bin/eap-install.mjs --list
+          HOME="$(mktemp -d)" XDG_CONFIG_HOME="$(mktemp -d)" node bin/eap-install.mjs --dry-run --only claude
+
+      - name: Bootstrap installer syntax
+        run: bash -n install.sh
+
+      - name: Zero third-party dependencies (Node built-ins + Python stdlib only)
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          pkg = json.load(open('package.json'))
+          deps = {**pkg.get('dependencies', {}), **pkg.get('optionalDependencies', {}), **pkg.get('peerDependencies', {})}
+          if deps:
+              print('Unexpected runtime dependencies (EAP must be zero-dep):', deps)
+              sys.exit(1)
+          print('OK: zero runtime dependencies')
+          PY
+
+      - name: Secret pattern smoke scan
+        run: |
+          if git grep -n -E '(sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z_-]{20,})' -- ':!*.png' ':!*.jpg' ':!*.ico'; then
+            echo 'Potential secret pattern found.' >&2
+            exit 1
+          fi

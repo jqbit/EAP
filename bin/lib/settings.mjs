@@ -68,7 +68,36 @@ export function stripJsonComments(src) {
     if (c === '/' && next === '*') { inBlock = true; i += 2; continue; }
     out += c; i++;
   }
-  return out.replace(/,(\s*[}\]])/g, '$1');
+  // String-aware trailing-comma sweep. A plain regex over `out` would also match
+  // commas inside string VALUES (e.g. "TODO: fix,}"), corrupting user data that
+  // then gets written back to disk. Walk char-by-char instead.
+  return stripTrailingCommas(out);
+}
+
+function stripTrailingCommas(s) {
+  let out = '';
+  let i = 0;
+  const n = s.length;
+  let inString = false;
+  let q = '';
+  while (i < n) {
+    const c = s[i];
+    if (inString) {
+      out += c;
+      if (c === '\\' && i + 1 < n) { out += s[i + 1]; i += 2; continue; }
+      if (c === q) inString = false;
+      i++; continue;
+    }
+    if (c === '"' || c === "'") { inString = true; q = c; out += c; i++; continue; }
+    if (c === ',') {
+      let j = i + 1;
+      while (j < n && /\s/.test(s[j])) j++;
+      if (j < n && (s[j] === '}' || s[j] === ']')) { i++; continue; }
+      out += c; i++; continue;
+    }
+    out += c; i++;
+  }
+  return out;
 }
 
 // ── readSettings ────────────────────────────────────────────────────────────

@@ -57,7 +57,12 @@ fi
 # this script itself arrived over a pipe (curl | bash). Fall back to
 # non-interactive when there is no terminal (CI) or EAP_NONINTERACTIVE is set.
 INSTALLER="$EAP_HOME/bin/eap-install.mjs"
-if [ -z "${EAP_NONINTERACTIVE:-}" ] && [ -e /dev/tty ] && [ -r /dev/tty ]; then
+# Guard on whether /dev/tty can actually be OPENED, not on its permission bits.
+# /dev/tty is mode 0666 so `-e`/`-r` are true even with no controlling terminal
+# (CI, `docker run` without -t, cron); opening it there fails with ENXIO, which
+# under `set -euo pipefail` would abort the whole install. The subshell open
+# test in the `if` condition fails cleanly instead, routing to non-interactive.
+if [ -z "${EAP_NONINTERACTIVE:-}" ] && ( : < /dev/tty ) 2>/dev/null; then
   node "$INSTALLER" "$@" < /dev/tty
 else
   node "$INSTALLER" --non-interactive "$@"

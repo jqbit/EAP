@@ -20,9 +20,9 @@ pattern='context-mode|mksglu|Koseoglu|Köseoğlu|Elastic-2\.0|Elastic License 2\
 code_hits="$(grep -RInE "$pattern" . \
   --include='*.mjs' --include='*.cjs' --include='*.js' \
   --include='*.mts' --include='*.cts' --include='*.ts' \
+  --include='*.jsx' --include='*.tsx' \
   --include='*.py' --include='*.json' \
   --exclude-dir=.git --exclude-dir=node_modules \
-  --exclude=package.json \
   2>/dev/null || true)"
 if [ -n "$code_hits" ]; then
   echo "FAIL: ELv2 upstream identifier found in SOURCE CODE (clean-room breach):" >&2

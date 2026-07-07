@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync, mkdirSync, symlinkSync, lstatSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -136,4 +136,29 @@ test('unknown --only id is rejected with exit 2', () => {
   const r = run(['--only', 'not-a-real-agent', '--non-interactive']);
   assert.equal(r.status, 2);
   assert.match(r.stderr, /unknown agent/);
+});
+
+test('a planted CLAUDE.md symlink is not followed (atomic write, symlink-safe)', () => {
+  const home = mkTmp('symhome');
+  const outside = mkTmp('symout');
+  try {
+    const target = join(outside, 'secret.txt');
+    writeFileSync(target, 'ORIGINAL SECRET\n');
+    const cfgDir = join(home, '.claude');
+    mkdirSync(cfgDir, { recursive: true });
+    symlinkSync(target, join(cfgDir, 'CLAUDE.md'));
+
+    const r = run(['--only', 'claude', '--config-dir', cfgDir, '--no-runtime', '--no-context', '--non-interactive'],
+      { env: { ...process.env, HOME: home, NO_COLOR: '1' } });
+    assert.notEqual(r.status, 2, r.stderr);
+
+    // The out-of-tree target must be untouched (symlink NOT followed)...
+    assert.equal(readFileSync(target, 'utf8').trim(), 'ORIGINAL SECRET');
+    // ...and CLAUDE.md must now be a real file with the Voice block.
+    assert.equal(lstatSync(join(cfgDir, 'CLAUDE.md')).isSymbolicLink(), false);
+    assert.match(readFileSync(join(cfgDir, 'CLAUDE.md'), 'utf8'), /eap-voice:begin/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
 });

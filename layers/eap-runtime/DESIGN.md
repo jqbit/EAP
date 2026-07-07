@@ -72,6 +72,44 @@ redirected to the indexed-fetch path).
   OS-isolated. This is a policy control, documented as such — not a sandbox.
 - Real isolation (bwrap/landlock/containers) is an explicit later layer.
 
+### Hardening applied (adversarial review)
+
+An adversarial review of every untrusted boundary produced these fixes, each
+with a regression test:
+
+- **Timeout DoS / silent-coercion (fixed):** `eap_execute`'s caller-supplied
+  `timeoutMs` is clamped to `[1, MAX_TIMEOUT_MS]` in `executor.mjs` — a value
+  `> 2**31-1` no longer coerces to a 1 ms kill, and a multi-day value can no
+  longer disable the only hard bound (and head-of-line-block the serve queue).
+- **Untrusted MCP params (fixed):** the context server coerces/validates
+  `depth`/`limit`/`top`/`degree_cap` (incl. float `Infinity` → `-32602`, not a
+  `-32603` crash) and confines `eap_graph_build`'s `root` to within the server
+  root (`realpath` containment).
+- **Poisoned cache (fixed):** graph-cache node `file` paths are validated as
+  in-tree relatives and `line` as a positive int, so a tampered cache cannot
+  forge an out-of-tree `file:line` pointer; any load failure (incl.
+  `RecursionError` from deeply-nested JSON) rebuilds rather than crashes.
+- **ReDoS (fixed):** the JS/TS/Go symbol extractors were made provably
+  linear-time (no adjacent unbounded whitespace groups; per-line anchoring).
+
+### Accepted limitations (documented, not yet mitigated)
+
+Honest disclosure — these are bounded, low-severity, and slated for the
+isolation layer:
+
+- **No OS resource limits (RLIMIT_AS/CPU/NPROC/FSIZE).** Within the wall-clock
+  window a script can exhaust RAM/disk/procs. The process-group SIGKILL reaps a
+  fork-bomb at timeout, but not before. Mitigation: `prlimit`/`ulimit` wrap in
+  the isolation layer.
+- **stdio frame size is not explicitly capped.** A single newline-free JSON-RPC
+  frame is buffered before dispatch. In practice the frame is bounded by the
+  calling model's max output (~MB), so this is not a real OOM vector; a hard
+  cap lands with the isolation layer.
+- **`.eap.json` hook config is trusted.** `eap-dispatch` reads `cfg.root` from
+  the config file to locate layer modules; an attacker who can write that file
+  (inside the user config dir) already controls the environment. Not an
+  elevation across the trust boundary.
+
 ## Honesty
 
 `eap_stats` reports **measured** bytes-kept-out (real `read`/`fetch` byte

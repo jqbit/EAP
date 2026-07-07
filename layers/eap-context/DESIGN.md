@@ -1,71 +1,70 @@
-# EAP-Context — design & fork plan
+# EAP-Context — design (as built)
 
 EAP-Context is the **input membrane**: it reduces the tokens that flow *into*
 context during retrieval. Instead of loading whole files, the agent queries a
 local code-symbol graph and receives a small subgraph plus `file:line` pointers
 it opens on demand.
 
-## Provenance (MIT fork — forkable)
+> This is a description of the **shipped** engine. For the exact tool list and
+> usage see `README.md` in this directory.
 
-EAP-Context is a **fork of the MIT-licensed graphify graph engine**
-(https://github.com/Graphify-Labs/graphify). MIT permits this. graphify's MIT
-`LICENSE` and copyright notice are retained (see `../../NOTICE`); modifications
-are added under the same MIT terms. Unlike EAP-Runtime, no clean-room firewall
-is required here — the code is libre and may be forked directly.
+## Provenance
 
-## What the fork keeps (the engine)
+EAP-Context is an **independent, Python-standard-library-only** implementation,
+**concept-derived** from the MIT-licensed
+[graphify](https://github.com/Graphify-Labs/graphify) project. It uses **no
+graphify source code** and **none of graphify's dependencies** (no tree-sitter,
+networkx, numpy, rapidfuzz, or `mcp` package). Building a lean stdlib engine
+instead of vendoring graphify's ~20-package dependency tree is a deliberate
+hard-freeze choice: it keeps EAP's supply-chain surface at zero. See
+`../../docs/legal/ATTRIBUTION.md`.
 
-- **AST → symbol graph.** tree-sitter parses source; nodes are symbols
-  (functions, classes, modules); edges are calls/imports/references with
-  per-edge `EXTRACTED` vs `INFERRED` provenance.
-- **Seed scoring + traversal.** trigram/IDF seed scoring on the query; bounded
-  BFS/DFS (depth ~3) with "god-node" avoidance so hub symbols don't blow up the
-  subgraph.
-- **Query surface (MCP tools).** `query_graph`, `get_node`, `get_neighbors`,
-  `get_community`, `god_nodes`, `graph_stats`, `shortest_path`, plus the PR-impact
-  tools — renamed to the `eap_graph_*` namespace.
-- **Materialized cache.** The graph persists as node-link JSON under `.eap/`
-  (NetworkX's natural format); it is a cache, not a second source of truth.
+## The engine (what ships)
 
-## What the fork strips (hard-freeze hygiene)
+- **Symbol extraction** (`src/eap_context/extract.py`):
+  - Python via the stdlib `ast` module (FunctionDef / AsyncFunctionDef /
+    ClassDef / Import / ImportFrom; refs = call names, decorators, class bases).
+  - JS/TS and Go via bounded, non-backtracking regex extractors (functions,
+    classes, imports). Minified/oversized lines are skipped to stay linear-time.
+  - Binary and very large files are skipped.
+- **Graph build** (`src/eap_context/graph.py`): nodes are symbols keyed by a
+  qualified id; edges carry `EXTRACTED` (explicit / same-file) vs `INFERRED`
+  (cross-file by name) provenance. Symlinks are not followed out of the root;
+  the ignore list covers `.git`, `node_modules`, `.eap`, `dist`, `build`, etc.
+- **Materialized cache**: node-link JSON at `<root>/.eap/graph.json`, written
+  atomically. It is a cache, rebuilt when missing or malformed; cached node
+  paths are validated to stay relative and within the root (no absolute or
+  `..`-escaping pointers are trusted).
+- **Query** (`src/eap_context/query.py`): substring/IDF seed scoring, bounded
+  BFS to a depth with a **god-node degree cap** so a hub symbol is included but
+  never expanded (it can't drag its callers into context). Returns a compact
+  subgraph plus `file:line` **pointers** — never file contents.
 
-- The **graphify name and branding** (YC/brand marks, Discord/FUNDING badges) —
-  EAP uses its own mark.
-- Any **upstream corpus** vendored for benchmarks (e.g. a bundled httpx tree).
-- Any **CI reference to upstream infrastructure** (e.g. an `origin/v8` ref) and
-  any **CDN-loaded assets** — EAP self-hosts or drops them.
-- Unreproducible **headline benchmark numbers** (LOCOMO/LongMemEval-style rows
-  whose harness is not shipped). EAP publishes only what its own `bench/`
-  reproduces (see `../../docs/EFFICIENCY.md`).
+## Public interface (MCP tools, `eap_graph_*`)
+
+`eap_graph_build`, `eap_graph_query`, `eap_graph_neighbors`, `eap_graph_stats`,
+`eap_graph_godnodes`, over JSON-RPC 2.0 stdio (`src/eap_context/mcp.py`), plus a
+`cli.py` (`python3 -m eap_context build <dir>` / `query <text>`).
 
 ## Integration on the EAP spine
 
-- Ships as an **MCP server** registered by the shared installer (the TLDR
-  `tldr-shrink` registration is the precedent), plus a **skill** that teaches the
-  agent to prefer a graph query over a raw file read.
-- The `PreToolUse` hook nudges: when the agent is about to read a large file,
-  suggest `eap_graph_query` first.
-- Retrieval routing: the shared `eap_search` front door sends **code-symbol**
-  queries here and **blob/log/doc** queries to EAP-Runtime's FTS store. No
-  functional duplication.
+- Registered as an **MCP server** by the shared installer (the TLDR
+  `tldr-shrink` registration is the precedent) — `python3 …/mcp.py <root>`.
+- The `PreToolUse` hook nudges a graph query before a large raw file read.
+- Retrieval routing: the front door sends **code-symbol** queries here and
+  **blob/log/doc** queries to EAP-Runtime's FTS store. No duplication.
 
 ## Runtime & dependencies
 
-- Python (tree-sitter grammars + a graph library). This is the one heavier
-  runtime in EAP; it is **optional and independently installable** — EAP-Voice
-  and EAP-Runtime work without it. All third-party Python deps are pinned and
-  enumerated in the fork's lockfile so the supply-chain surface is explicit and
-  auditable (hard-freeze requirement).
+Python 3 standard library only — **zero third-party dependencies**. The layer
+is optional and independently installable; EAP-Voice and EAP-Runtime work
+without it.
 
-## Correctness
+## Correctness & safety
 
 Graph retrieval returns **pointers**, not summaries — the agent opens the real
 `file:line`, so retrieval is lossless. If the graph is stale or missing, the
 agent falls back to ordinary read/grep (the lossless escape hatch). The graph
-never rewrites source.
-
-## Status
-
-Design + fork plan (this document). The engine port from the MIT upstream — AST
-ingest, graph build, the `eap_graph_*` MCP surface, and the `.eap/` cache — is
-the next build step, following the strip list above.
+never rewrites source. Extraction is bounded to linear time (no catastrophic
+regex backtracking); out-of-tree symlinks are refused; a corrupt or poisoned
+cache is rejected and rebuilt rather than trusted.

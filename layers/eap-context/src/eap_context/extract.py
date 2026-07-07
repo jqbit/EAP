@@ -23,6 +23,7 @@ import os
 import re
 
 MAX_FILE_BYTES = 1_000_000  # skip anything larger; source files this big are generated
+MAX_LINE_BYTES = 2_000  # skip minified/generated lines before running any regex extractor
 
 CODE_EXTENSIONS = {".py", ".js", ".mjs", ".jsx", ".ts", ".tsx", ".go"}
 
@@ -174,8 +175,13 @@ _JS_KEYWORDS = frozenset(
 
 _JS_DEFS = [
     # function name(...) / export default async function name(
+    # Whitespace after `function` is confined to `[ \t]` (never crosses a
+    # newline) and the generator `*` is an optional group with its own fixed
+    # `\*` anchor, so there are never two adjacent unbounded `\s*` groups on the
+    # same run — the earlier `function\s*\*?\s*` form backtracked quadratically
+    # on `"function" + "\n"*N` (a ReDoS reachable from file contents).
     ("function", re.compile(
-        r"^[ \t]*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*"
+        r"^[ \t]*(?:export\s+)?(?:default\s+)?(?:async\s+)?function[ \t]*(?:\*[ \t]*)?"
         r"([A-Za-z_$][\w$]*)", re.M)),
     # const name = (...) => / const name = x =>
     ("function", re.compile(
@@ -191,10 +197,50 @@ _JS_DEFS = [
         r"([A-Za-z_$][\w$]*)(?:\s+extends\s+([A-Za-z_$][\w$.]*))?", re.M)),
 ]
 
+# Import-clause tokens ([\w{}$*,]+) are kept DISJOINT from the separating
+# whitespace (\s+) so there is no overlapping-quantifier ambiguity: the old
+# `[\w{}\s,*$]+?\s+from` had \s in the token class AND as the separator, which
+# backtracks quadratically on adversarial input (ReDoS). This form is linear.
 _JS_IMPORT = re.compile(
-    r"^[ \t]*import\s+(?:[\w{}\s,*$]+?\s+from\s+)?['\"]([^'\"]+)['\"]", re.M)
+    r"^[ \t]*import\s+(?:[\w{}$*,]+(?:\s+[\w{}$*,]+)*\s+from\s+)?['\"]([^'\"]+)['\"]",
+    re.M)
 _JS_REQUIRE = re.compile(r"require\(\s*['\"]([^'\"]+)['\"]\s*\)")
 _CALL_RE = re.compile(r"\b([A-Za-z_$][\w$]*)\s*\(")
+
+
+def _scannable(text: str) -> str:
+    """Return *text* with over-long (minified/generated) lines neutralized.
+
+    Each line longer than ``MAX_LINE_BYTES`` is replaced by an equal-length run
+    of spaces, so no extractor regex ever runs across a pathological line while
+    byte offsets and line numbers are preserved exactly (same length, same
+    ``\\n`` positions). Cheap fast-paths skip the rebuild when nothing is long.
+    """
+    if len(text) <= MAX_LINE_BYTES:
+        return text
+    lines = text.split("\n")
+    if all(len(ln) <= MAX_LINE_BYTES for ln in lines):
+        return text
+    return "\n".join(
+        (" " * len(ln)) if len(ln) > MAX_LINE_BYTES else ln for ln in lines
+    )
+
+
+def _find_import_specs(text: str, regex) -> list[tuple[int, str]]:
+    """Line-scan *text* for import/require specs, cheapest checks first.
+
+    Skips lines with no quote (an import spec is always quoted) and lines over
+    ``MAX_LINE_BYTES`` before ever running *regex*, so a pathological line can
+    neither match nor cost anything. Returns (absolute_offset, spec) pairs.
+    """
+    specs: list[tuple[int, str]] = []
+    offset = 0
+    for line in text.split("\n"):
+        if len(line) <= MAX_LINE_BYTES and ("'" in line or '"' in line):
+            for m in regex.finditer(line):
+                specs.append((offset + m.start(), m.group(1)))
+        offset += len(line) + 1  # + 1 for the '\n' consumed by split
+    return specs
 
 
 def _line_at(text: str, pos: int) -> int:
@@ -248,8 +294,9 @@ def _extract_regex_lang(text: str, rel: str, defs, import_specs, keywords) -> li
 
 
 def _extract_js(text: str, rel: str) -> list[dict]:
-    imports = [(m.start(), m.group(1)) for m in _JS_IMPORT.finditer(text)]
-    imports += [(m.start(), m.group(1)) for m in _JS_REQUIRE.finditer(text)]
+    text = _scannable(text)
+    imports = _find_import_specs(text, _JS_IMPORT)
+    imports += _find_import_specs(text, _JS_REQUIRE)
     return _extract_regex_lang(text, rel, _JS_DEFS, imports, _JS_KEYWORDS)
 
 
@@ -269,14 +316,38 @@ _GO_DEFS = [
 ]
 
 _GO_IMPORT_ONE = re.compile(r'^import\s+(?:\w+\s+)?"([^"]+)"', re.M)
-_GO_IMPORT_BLOCK = re.compile(r"^import\s*\(([^)]*)\)", re.M | re.S)
-_GO_IMPORT_LINE = re.compile(r'(?:\w+\s+)?"([^"]+)"')
+# Only the block OPENER is a regex; the closing paren is resolved by a linear
+# str.find (see _extract_go). The old `^import\s*\(([^)]*)\)` re-attempted an
+# unbounded backtracking `([^)]*)` scan at every "import (" start, going
+# quadratic on a file of many unterminated "import (" lines (measured: a 180KB
+# .go file burned ~11s). Whitespace is confined to `[ \t]` (Go's `import (` is a
+# single line).
+_GO_IMPORT_BLOCK_START = re.compile(r"^import[ \t]*\(", re.M)
+# Anchored per-line with re.M so finditer only re-attempts at line starts (every
+# other def/import regex here is `^`-anchored for exactly this reason). The old
+# UNANCHORED `(?:\w+\s+)?"..."` let finditer restart the greedy `\w+` alias scan
+# at every offset inside a long word-run, going super-linear on a crafted import
+# block body (measured: an ~800KB .go file took ~11s; now ~16ms). Whitespace is
+# confined to `[ \t]` (an alias and its quoted path are always on one line).
+_GO_IMPORT_LINE = re.compile(r'^[ \t]*(?:\w+[ \t]+)?"([^"]+)"', re.M)
 
 
 def _extract_go(text: str, rel: str) -> list[dict]:
+    text = _scannable(text)
     imports = [(m.start(), m.group(1)) for m in _GO_IMPORT_ONE.finditer(text)]
-    for block in _GO_IMPORT_BLOCK.finditer(text):
-        base = block.start(1)
-        for m in _GO_IMPORT_LINE.finditer(block.group(1)):
-            imports.append((base + m.start(), m.group(1)))
+    # Resolve each `import ( … )` block with a single forward str.find for the
+    # closing paren (C-level, no backtracking), advancing the cursor past each
+    # resolved block so tails are never rescanned — linear in file size.
+    pos = 0
+    while True:
+        m = _GO_IMPORT_BLOCK_START.search(text, pos)
+        if not m:
+            break
+        start = m.end()
+        close = text.find(")", start)
+        if close == -1:
+            break  # no closing paren after this opener — stop, don't rescan
+        for im in _GO_IMPORT_LINE.finditer(text[start:close]):
+            imports.append((start + im.start(), im.group(1)))
+        pos = close + 1
     return _extract_regex_lang(text, rel, _GO_DEFS, imports, _GO_KEYWORDS)

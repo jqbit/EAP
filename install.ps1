@@ -35,19 +35,23 @@ if (-not (Get-Command python3 -ErrorAction SilentlyContinue) -and -not (Get-Comm
   Warn '  note: python not found — the EAP-Context graph layer needs it (Voice + Runtime still work; use --no-context to skip).'
 }
 
-# Fetch or update the repo.
+# Fetch or update the repo. On PowerShell 7.4+, $PSNativeCommandUseErrorActionPreference
+# makes a non-zero native exit throw under $ErrorActionPreference='Stop', so wrap
+# git in try/catch and inspect $LASTEXITCODE (mirrors the sh side's `|| warn`).
 if (Test-Path (Join-Path $EapHome '.git')) {
   Say "Updating EAP in $EapHome"
-  git -C $EapHome pull --ff-only --quiet
+  try { git -C $EapHome pull --ff-only --quiet } catch {}
+  if ($LASTEXITCODE -ne 0) { Warn '  (could not fast-forward; using existing checkout)' }
 } else {
   Say "Cloning $Repo into $EapHome"
-  git clone --depth 1 --branch $Branch "https://github.com/$Repo.git" $EapHome
+  try { git clone --depth 1 --branch $Branch "https://github.com/$Repo.git" $EapHome } catch {}
   if ($LASTEXITCODE -ne 0) { Fail "clone failed. If $Repo is private, make it public or run from a local clone." }
 }
 
-# Run the installer (console stdin drives the TUI). EAP_ARGS forwards flags.
+# Run the installer (console stdin drives the TUI). EAP_ARGS forwards flags;
+# trim and drop empty tokens so a stray space doesn't pass "" as an argument.
 $installer = Join-Path $EapHome 'bin/eap-install.mjs'
 $eapArgs = @()
-if ($env:EAP_ARGS) { $eapArgs = $env:EAP_ARGS -split '\s+' }
+if ($env:EAP_ARGS) { $eapArgs = $env:EAP_ARGS.Trim() -split '\s+' | Where-Object { $_ } }
 if ($env:EAP_NONINTERACTIVE) { $eapArgs = @('--non-interactive') + $eapArgs }
 node $installer @eapArgs

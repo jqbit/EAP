@@ -29,7 +29,7 @@ import readline from 'node:readline';
 import {
   readSettings, writeSettings, validateHookFields,
   addCommandHook, removeCommandHooks,
-  upsertFencedBlock, stripFencedBlock,
+  upsertFencedBlock, stripFencedBlock, atomicWrite,
 } from './lib/settings.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -275,7 +275,10 @@ function installClaude(ctx) {
     const existing = fs.existsSync(claudeMd) ? fs.readFileSync(claudeMd, 'utf8') : null;
     const next = upsertFencedBlock(existing, VOICE_BEGIN, VOICE_END, voiceBody);
     fs.mkdirSync(path.dirname(claudeMd), { recursive: true });
-    fs.writeFileSync(claudeMd, next, { mode: 0o644 });
+    backupOnce(claudeMd);
+    // atomicWrite (temp + rename) is symlink-safe, unlike fs.writeFileSync which
+    // would follow a planted CLAUDE.md symlink and write through to its target.
+    atomicWrite(claudeMd, next, 0o644);
     ok(`  [1/3] Voice rule written to ${claudeMd}`);
   }
 
@@ -295,6 +298,7 @@ function installClaude(ctx) {
     else {
       if (!cfg.mcpServers || typeof cfg.mcpServers !== 'object') cfg.mcpServers = {};
       for (const [name, s] of Object.entries(servers)) cfg.mcpServers[name] = s;
+      backupOnce(mcpPath);
       writeSettings(mcpPath, cfg);
       ok(`  [2/3] MCP registered in ${mcpPath}: ${serverNames.join(', ')}`);
     }
@@ -357,7 +361,7 @@ function uninstall(ctx) {
     const { text, stripped } = stripFencedBlock(fs.readFileSync(claudeMd, 'utf8'), VOICE_BEGIN, VOICE_END);
     if (stripped && !opts.dryRun) {
       if (text === '') { try { fs.unlinkSync(claudeMd); } catch { /* best effort */ } }
-      else fs.writeFileSync(claudeMd, text, { mode: 0o644 });
+      else atomicWrite(claudeMd, text, 0o644);  // symlink-safe, matches install
     }
     if (stripped) ok(text === '' ? `  removed ${claudeMd}` : `  stripped Voice block from ${claudeMd}`);
   }
@@ -585,6 +589,15 @@ function runInstall(opts) {
   if (/["`$\n\r]/.test(configDir)) {
     process.stderr.write(c.red(`config-dir contains shell-unsafe characters and was refused: ${configDir}\n`));
     return 2;
+  }
+  // The same hook command string also interpolates the EAP checkout dir
+  // (REPO_ROOT → HOOK_DISPATCH) and the node binary path, in the same
+  // double-quoted shell context — refuse shell-active characters there too.
+  for (const [label, val] of [['EAP repo dir', REPO_ROOT], ['node binary path', process.execPath]]) {
+    if (/["`$\n\r]/.test(val)) {
+      process.stderr.write(c.red(`${label} contains shell-unsafe characters and was refused: ${val}\n`));
+      return 2;
+    }
   }
 
   const ctx = {

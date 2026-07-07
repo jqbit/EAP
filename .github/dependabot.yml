@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # EAP has ZERO runtime dependencies (Node built-ins + Python stdlib only), so
+  # there is no npm/pip manifest to watch. We only pin GitHub Actions by SHA;
+  # Dependabot bumps those pins so they do not silently rot.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(ci)"

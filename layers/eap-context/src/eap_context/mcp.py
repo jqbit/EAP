@@ -15,6 +15,7 @@ direct method names (method == "eap_graph_query") are accepted.
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 from . import graph as graph_mod
@@ -38,6 +39,24 @@ class JsonRpcError(Exception):
         self.message = message
 
 
+def _coerce_int(value, key: str) -> int:
+    """Coerce a JSON param to int or raise INVALID_PARAMS at the boundary.
+
+    Without this a non-int ``depth``/``limit`` raises ValueError and a non-int
+    ``degree_cap`` raises TypeError deep inside query(), both surfacing as a
+    generic INTERNAL_ERROR instead of a clean, caller-actionable JSON-RPC error.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise JsonRpcError(INVALID_PARAMS, f"param {key!r} must be an integer")
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: int(float('inf')) — serve() uses json.loads (allow_nan
+        # on by default), so a bare `Infinity` for depth/limit/top/degree_cap is
+        # reachable on the wire and must surface as -32602, not -32603.
+        raise JsonRpcError(INVALID_PARAMS, f"param {key!r} must be an integer")
+
+
 class Engine:
     """Holds the target root and a lazily loaded graph."""
 
@@ -53,7 +72,23 @@ class Engine:
     # -- tool implementations -------------------------------------------------
 
     def build(self, params: dict) -> dict:
-        root = params.get("root", self.root)
+        # A caller-supplied root is confined to within the server's configured
+        # root: otherwise build_and_save would read every file under an
+        # arbitrary absolute/`..`-escaping directory and write a cache there.
+        root = params.get("root")
+        if root is None:
+            root = self.root
+        else:
+            # os.path.realpath raises TypeError on a non-str/PathLike (int, list,
+            # bool, dict), which would surface as -32603; validate at the
+            # boundary so a bad type is a clean -32602 like every other param.
+            if not isinstance(root, str):
+                raise JsonRpcError(INVALID_PARAMS, "param 'root' must be a string")
+            base = os.path.realpath(self.root)
+            target = os.path.realpath(root)
+            if target != base and not target.startswith(base + os.sep):
+                raise JsonRpcError(INVALID_PARAMS, "root must be within the server root")
+            root = target
         g, path = graph_mod.build_and_save(root)
         self.root = root
         self._graph = g
@@ -63,12 +98,17 @@ class Engine:
         text = params.get("query") or params.get("text")
         if not text or not isinstance(text, str):
             raise JsonRpcError(INVALID_PARAMS, "missing required string param 'query'")
+        depth = _coerce_int(params.get("depth", DEFAULT_DEPTH), "depth")
+        limit = _coerce_int(params.get("limit", DEFAULT_LIMIT), "limit")
+        degree_cap = params.get("degree_cap")
+        if degree_cap is not None:
+            degree_cap = _coerce_int(degree_cap, "degree_cap")
         return query_mod.query(
             self.graph(),
             text,
-            depth=int(params.get("depth", DEFAULT_DEPTH)),
-            limit=int(params.get("limit", DEFAULT_LIMIT)),
-            degree_cap=params.get("degree_cap"),
+            depth=depth,
+            limit=limit,
+            degree_cap=degree_cap,
         )
 
     def neighbors(self, params: dict) -> dict:
@@ -84,7 +124,7 @@ class Engine:
         return query_mod.stats(self.graph())
 
     def godnodes(self, params: dict) -> dict:
-        top = int(params.get("top", 10))
+        top = _coerce_int(params.get("top", 10), "top")
         return {"god_nodes": query_mod.god_nodes(self.graph(), top=top)}
 
 

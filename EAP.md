@@ -34,9 +34,10 @@ tiers). This layer is the perfected TLDR prompt; it is prompt-only and needs no
 runtime. See `layers/eap-voice/`.
 
 ### EAP-Context (input) — opt-in
-A local code-symbol graph (tree-sitter AST → symbol graph with provenance) plus
-a lexical blob index. Instead of loading whole files, the agent queries the
-graph for the relevant subgraph and receives `file:line` pointers it opens on
+A local code-symbol graph (Python-stdlib `ast` for Python plus lightweight
+regex extractors for JS/TS/Go → symbol graph with provenance). Instead of
+loading whole files, the agent queries the graph for the relevant subgraph and
+receives `file:line` pointers it opens on
 demand. Deterministic, no LLM, no network. See `layers/eap-context/`.
 
 ### EAP-Runtime (working) — opt-in
@@ -67,9 +68,10 @@ from lossless retrieval with recall. See `docs/EFFICIENCY.md`.
 
 ## Ownership & licensing
 
-MIT, sole-maintained, self-contained hard fork with zero upstream runtime
-coupling. EAP-Voice and EAP-Runtime are original / cleanroom code. EAP-Context
-forks the MIT-licensed graphify graph engine with its copyright notice
-retained. The Elastic-Licensed context-mode project is **cleanroom-reimplemented
-from concept only — zero source is used**. Full posture:
+MIT, sole-maintained, self-contained, with zero upstream runtime coupling and
+**zero third-party code or dependencies**. Every layer is original / clean-room
+code. EAP-Context is an independent Python-stdlib symbol-graph engine
+**concept-derived from the MIT-licensed graphify project — no graphify code or
+dependencies used**. The Elastic-Licensed context-mode project is
+**clean-room-reimplemented from concept only — zero source is used**. Full posture:
 `docs/legal/ATTRIBUTION.md` and `NOTICE`.
