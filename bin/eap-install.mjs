@@ -546,7 +546,15 @@ function installMcpCli(ctx, prov, desc, servers) {
       note(`  To register manually once ${bin} is installed, run: ${printable}`);
       continue;
     }
-    const r = child_process.spawnSync(bin, argv, { stdio: 'inherit' });
+    // `hermes mcp add` connects, discovers tools, then prompts "Enable all
+    // tools? [Y/n]" on stdin. Under a non-interactive install that prompt has no
+    // TTY and CANCELS — the CLI exits 0 but the server is NOT saved. Feed the
+    // default "y" so the server persists with its tools enabled. codex/grok
+    // (cli-dashdash) are non-interactive and keep inherited stdio.
+    const spawnOpts = desc.kind === 'cli-hermes'
+      ? { input: 'y\n', stdio: ['pipe', 'inherit', 'inherit'] }
+      : { stdio: 'inherit' };
+    const r = child_process.spawnSync(bin, argv, spawnOpts);
     if ((r.status || 0) !== 0) { warn(`  ${bin} mcp add ${name} failed`); results.failed.push([`${prov.id}-mcp`, `${name} registration failed`]); }
     else ok(`  MCP registered via '${bin} mcp add': ${name}`);
   }
