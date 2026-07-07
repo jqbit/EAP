@@ -26,8 +26,9 @@ One installer, one hook dispatcher, one skill format, three compression gates.
 | Layer | State | Notes |
 |---|---|---|
 | **EAP-Voice** | **shipping** | The perfected TLDR prompt/skill, prompt-only, works on 35+ agents today. |
-| **EAP-Runtime** | core built (clean-room) | Minimal deterministic offload core on `node:sqlite`; full MCP surface in progress. |
-| **EAP-Context** | design + fork plan | MIT graphify fork specced; engine port in progress. |
+| **EAP-Runtime** | **built** (clean-room) | Executor ("think in code"), session event log + snapshot/restore, offload store, JSON-RPC 2.0 stdio MCP server. 33 node tests green (`npm test`). |
+| **EAP-Context** | **built** (stdlib-only) | Symbol-graph engine (Python `ast` + JS/TS extraction), query with pointers, CLI + stdio MCP server. 9 Python tests green (`npm run test:py`). |
+| **Bench** | **built** | Deterministic harness over a committed 82 KB corpus; 6 fixed tasks, B2 vs honest grep baseline B1: 37.3% aggregate token reduction, task success 6/6 (`npm run bench`). |
 
 See `docs/ARCHITECTURE.md` for the full design and `EAP.md` for the protocol.
 
@@ -42,7 +43,8 @@ from lossless retrieval with recall. Details: `docs/EFFICIENCY.md`.
 ## Ownership
 
 MIT, sole-maintained, self-contained. EAP-Voice and EAP-Runtime are original /
-clean-room code; EAP-Context forks MIT-licensed graphify (notice retained). The
+clean-room code; EAP-Context is concept-derived from MIT-licensed graphify
+(stdlib-only, no graphify code or dependencies used; notice retained). The
 Elastic-Licensed context-mode project is clean-room-reimplemented from concept
 only — **zero source used**. Full provenance: `docs/legal/ATTRIBUTION.md`.
 
@@ -53,7 +55,7 @@ EAP/
 ├── EAP.md                     # the protocol
 ├── layers/eap-voice/          # output compression (shipping — perfected TLDR)
 ├── layers/eap-runtime/        # working/tool-output offload (clean-room)
-├── layers/eap-context/        # input/retrieval graph (graphify fork)
+├── layers/eap-context/        # input/retrieval symbol graph (stdlib, concept-derived)
 ├── docs/                      # ARCHITECTURE, EFFICIENCY, legal/
 ├── bench/                     # honest, reproducible efficiency harness
 ├── scripts/check-contamination.sh   # ELv2 clean-room guard (CI gate)

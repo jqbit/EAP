@@ -21,17 +21,21 @@ design (drop the persona, keep the compression) is documented in TLDR's
 
 ## EAP-Context (input / retrieval)
 
-Forks the **graphify** code-graph engine.
+**Concept-derived from graphify — independent implementation, no code taken.**
 
-- **graphify** — https://github.com/Graphify-Labs/graphify — **MIT License**.
-  MIT permits redistribution, modification, and relicense-compatible
-  combination. graphify's MIT `LICENSE` and its copyright notice are **retained
-  verbatim** in `NOTICE`. Our modifications are added under the same MIT terms.
-  This retained notice is the project's only permanent upstream tie, and being
-  libre-compatible it constrains nothing.
-- The graphify **name and branding are dropped** (YC/brand marks); EAP uses its
-  own mark. Upstream corpora, CI refs to upstream infrastructure, and CDN
-  assets are stripped from the fork.
+- **graphify** — https://github.com/Graphify-Labs/graphify — **MIT License**,
+  © 2026 Safi Shamsi. EAP-Context is an **independent, Python-standard-library-
+  only** symbol-graph engine whose *design* is informed by graphify's
+  code-graph approach (AST-derived symbol graph → bounded traversal → `file:line`
+  pointers instead of file dumps). It uses **no graphify source code** and
+  **none of graphify's dependencies** (tree-sitter, networkx, numpy, rapidfuzz,
+  the `mcp` package). Because zero code is copied, there is no MIT notice to
+  retain from a code-inclusion standpoint — graphify is credited here for the
+  concept as a matter of good faith and honesty.
+- Building a lean stdlib engine (rather than vendoring graphify's ~20-package
+  dependency tree) is a deliberate hard-freeze choice: it keeps EAP's
+  supply-chain surface at zero, which is a core project requirement.
+- The graphify **name and branding are not used**; EAP uses its own mark.
 
 ## EAP-Runtime (working / tool-output offload)
 
@@ -63,7 +67,9 @@ ELv2 identifiers (`context-mode`, `mksglu`, `Koseoglu`/`Köseoğlu`, `Elastic-2.
 
 ## Summary
 
-EAP ships **MIT**, sole-copyright-holder for all original and clean-room code,
-with a single retained MIT attribution to graphify's author for the graph
-layer. Fully relicensable, zero copyleft, zero ELv2 contamination, zero
-upstream runtime coupling.
+EAP ships **MIT**, **sole copyright holder for 100% of the code** — every layer
+is original or clean-room, with **no third-party source code included** and
+**no third-party runtime dependencies**. Upstream projects are credited for
+concepts only (graphify, context-mode, caveman, TLDR, ponytail). Fully
+relicensable, zero copyleft, zero ELv2 contamination, zero upstream coupling,
+zero supply-chain surface.

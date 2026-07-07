@@ -8,6 +8,8 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "test": "node --test tests/*.test.mjs",
+    "test:py": "python3 tests/test_context_engine.py",
+    "bench": "python3 bench/run.py",
     "check": "bash scripts/check-contamination.sh"
   },
   "keywords": [

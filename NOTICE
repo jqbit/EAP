@@ -3,23 +3,27 @@ Copyright (c) 2026 jqbit
 Licensed under the MIT License (see LICENSE).
 
 ================================================================================
-Third-party components
+Provenance
 ================================================================================
 
-EAP-Context incorporates a fork of the graph-indexing engine from:
+All source code in this repository is original / clean-room work by the EAP
+maintainer. NO third-party source code is included or vendored.
 
-  graphify
-  Copyright (c) 2026 Graphify Labs / Safi Shamsi
-  Licensed under the MIT License.
+The following projects are credited for CONCEPTS and design (no code taken):
 
-  The above copyright notice and the MIT permission notice are retained as
-  required by the MIT License. Modifications for EAP are (c) 2026 jqbit and are
-  released under the same MIT terms.
+  * graphify  — https://github.com/Graphify-Labs/graphify  — MIT
+    EAP-Context is an independent, standard-library-only symbol-graph engine
+    whose design is informed by graphify's code-graph approach. No graphify
+    source and none of its dependencies (tree-sitter, networkx, numpy, etc.)
+    are used.
 
-================================================================================
-Clean-room note
-================================================================================
+  * context-mode — https://github.com/mksglu/context-mode — Elastic License 2.0
+    EAP-Runtime is an independent clean-room reimplementation of the general
+    context-offload pattern (also seen in OpenAI Code Interpreter and
+    Anthropic's "code execution with MCP"). It contains NO context-mode source.
 
-EAP-Runtime is an independent clean-room reimplementation of the context-offload
-pattern. It contains NO source code from the Elastic-Licensed "context-mode"
-project. See docs/legal/ATTRIBUTION.md.
+  * caveman (MIT, Julius Brussee), TLDR (MIT, jqbit), ponytail (MIT, Dietrich
+    Gebert) — EAP-Voice descends from TLDR (which credits caveman); ponytail's
+    code-brevity concept is an optional Voice sub-mode. No ponytail code taken.
+
+See docs/legal/ATTRIBUTION.md for the full record and the clean-room guard.

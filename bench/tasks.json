@@ -1,0 +1,61 @@
+{
+  "note": "Fixed task suite over bench/corpus. 'expected' is a checkable string that must appear verbatim in the text each arm would place in the agent's context for the arm to score task_success. 'grep_keyword' is what a competent grep-and-read agent (B1) would grep for; 'eap_query' is what the agent would pass to eap_search (B2).",
+  "search_limit": 3,
+  "offload_threshold_bytes": 16384,
+  "tasks": [
+    {
+      "id": "log-500-source",
+      "kind": "runtime-offload",
+      "file": "corpus/access.log",
+      "question": "Requests to /api/checkout are returning HTTP 500. Which client IP is generating the 500s?",
+      "grep_keyword": "checkout",
+      "eap_query": "checkout 500",
+      "expected": "203.0.113.42"
+    },
+    {
+      "id": "log-scraper-ua",
+      "kind": "runtime-offload",
+      "file": "corpus/access.log",
+      "question": "Client 198.51.100.23 is hammering the product API. What User-Agent does it send?",
+      "grep_keyword": "198.51.100.23",
+      "eap_query": "198.51.100.23",
+      "expected": "DataMinerBot/2.1"
+    },
+    {
+      "id": "log-slowest-flagged",
+      "kind": "runtime-offload",
+      "file": "corpus/access.log",
+      "question": "The middleware tags requests over 5s with [SLOW]. What is the highest duration it flagged?",
+      "grep_keyword": "SLOW",
+      "eap_query": "SLOW",
+      "expected": "9142ms"
+    },
+    {
+      "id": "issues-security-assignee",
+      "kind": "runtime-offload",
+      "file": "corpus/issues.json",
+      "question": "Who is assigned to the open issue labeled both security and critical?",
+      "grep_keyword": "security",
+      "eap_query": "security critical",
+      "expected": "mchen"
+    },
+    {
+      "id": "issues-open-regression",
+      "kind": "runtime-offload",
+      "file": "corpus/issues.json",
+      "question": "Which open issue is the release-blocking regression? Give its id.",
+      "grep_keyword": "regression",
+      "eap_query": "regression",
+      "expected": "4302"
+    },
+    {
+      "id": "code-fee-bps",
+      "kind": "context-retrieval",
+      "file": "corpus/src/payments.py",
+      "question": "How many basis points does calculate_fee charge (FEE_BPS)?",
+      "grep_keyword": "FEE_BPS",
+      "eap_query": "FEE_BPS",
+      "expected": "275"
+    }
+  ]
+}

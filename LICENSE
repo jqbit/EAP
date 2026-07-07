@@ -22,7 +22,6 @@ SOFTWARE.
 
 ---
 
-This project incorporates a fork of the graph-indexing engine from the
-MIT-licensed "graphify" project; its required copyright notice is retained in
-NOTICE and docs/legal/ATTRIBUTION.md. No other third-party code is included;
-see docs/legal/ATTRIBUTION.md for the full provenance and clean-room record.
+All code in this repository is original / clean-room work. No third-party
+source code is included. Concept credits (graphify, context-mode, caveman,
+TLDR, ponytail) are recorded in NOTICE and docs/legal/ATTRIBUTION.md.
