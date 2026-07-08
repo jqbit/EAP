@@ -15,6 +15,7 @@ cache, never a second source of truth.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -54,6 +55,13 @@ class SymbolGraph:
         # extracted-symbol cache that powers incremental rebuilds. Populated by
         # build(); persisted alongside graph.json by build_and_save().
         self.file_index: dict[str, dict] = {}
+        # Cross-query memoization (C1): each is a pure function of this graph's
+        # immutable post-build state, so it is safe to cache for the object's
+        # lifetime. A rebuild returns a NEW SymbolGraph, so object identity
+        # invalidates every cache — no manual invalidation is ever needed.
+        self._node_tokens_cache: dict[str, set] = {}
+        self._idf_cache: dict[str, float] = {}
+        self._trigram_index: dict | None = None
 
     # -- construction -------------------------------------------------------
 
@@ -153,7 +161,23 @@ def iter_source_files(root: str, ignore=DEFAULT_IGNORE):
 # ---------------------------------------------------------------------------
 
 
-def build(root: str, ignore=DEFAULT_IGNORE, incremental: bool = False) -> SymbolGraph:
+def _file_sha(abspath: str) -> str:
+    """sha256 hex of a source file's bytes, matching extract.extract_file_hashed.
+
+    An oversized (never-read) or unreadable file hashes to ``""`` — exactly the
+    sentinel the fingerprint writer stores — so comparisons stay consistent.
+    """
+    try:
+        if os.path.getsize(abspath) > extract.MAX_FILE_BYTES:
+            return ""
+        with open(abspath, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return ""
+
+
+def build(root: str, ignore=DEFAULT_IGNORE, incremental: bool = False,
+          verify_hash: bool = True) -> SymbolGraph:
     """Index *root* into a SymbolGraph (two passes: extract, then resolve).
 
     When *incremental* is true, a prior per-file fingerprint cache
@@ -181,8 +205,15 @@ def build(root: str, ignore=DEFAULT_IGNORE, incremental: bool = False) -> Symbol
             continue
         prev = old_index.get(rel)
         if prev and prev.get("size") == size and prev.get("mtime_ns") == mtime_ns:
-            symbols = prev["symbols"]  # unchanged: reuse cached extraction
+            symbols = prev["symbols"]  # unchanged (size+mtime): reuse cached extraction
             sha = prev.get("sha256", "")
+        elif (verify_hash and prev and prev.get("size") == size
+              and prev.get("sha256") and _file_sha(abspath) == prev["sha256"]):
+            # size matches, mtime bumped, but content is byte-identical (e.g. a
+            # git checkout that only touched mtimes): reuse the cached symbols and
+            # refresh the fingerprint's mtime — no re-extraction. (C4)
+            symbols = prev["symbols"]
+            sha = prev["sha256"]
         else:
             symbols, sha, size = extract.extract_file_hashed(abspath, rel)
         # Record a fingerprint for every walked source file (even 0-symbol ones)
@@ -401,23 +432,63 @@ def build_and_save(root: str, ignore=DEFAULT_IGNORE,
     return g, path
 
 
-def load_or_build(root: str, rebuild: bool = False) -> SymbolGraph:
-    """Cache-first load; falls back to an incremental rebuild (and saves it).
+def _sources_changed(root: str, ignore=DEFAULT_IGNORE) -> bool:
+    """True if the on-disk source tree no longer matches the fingerprint cache.
 
-    When the graph cache is missing or rejected, the rebuild reuses the per-file
-    fingerprint cache (``.eap/index.json``) so only changed files are
-    re-extracted; a missing/poisoned fingerprint cache degrades to a full build.
+    Walks ``iter_source_files`` and compares each file's byte-size AND content
+    hash against ``index.json``; also flags added or removed files. Content is
+    hashed (not merely mtime-compared) so a same-size, mtime-preserved edit is
+    still detected — the whole point of persisting sha256 (C4). A missing or
+    unusable fingerprint cache is treated as changed, forcing a rebuild.
+    """
+    index = load_file_index(root)
+    if not index:
+        return True
+    remaining = set(index)
+    for abspath, rel in iter_source_files(root, ignore):
+        prev = index.get(rel)
+        if prev is None:
+            return True  # a file the cache never saw
+        remaining.discard(rel)
+        try:
+            size = os.path.getsize(abspath)
+        except OSError:
+            return True
+        if prev.get("size") != size or _file_sha(abspath) != prev.get("sha256", ""):
+            return True
+    return bool(remaining)  # any indexed file no longer on disk
+
+
+def load_or_build(root: str, rebuild: bool = False,
+                  verify_hash: bool = True) -> SymbolGraph:
+    """Cache-first load; rebuilds when the cache is missing, rejected, or stale.
+
+    With *verify_hash* on (default), a loaded cache is only returned after a
+    stat+hash walk confirms the source tree is unchanged (C4); otherwise the
+    graph is rebuilt from source so a stale cache is never served. When the graph
+    cache is simply missing/rejected, the rebuild reuses the per-file fingerprint
+    cache (``.eap/index.json``) so only changed files are re-extracted; a
+    missing/poisoned fingerprint cache degrades to a full build.
     """
     path = cache_path(root)
     if not rebuild and os.path.isfile(path):
         try:
-            return load(path)
+            g = load(path)
         except Exception:
-            # A cache is untrusted input and build_and_save (below, outside this
-            # try) is an unconditional rebuild fallback, so ANY load failure —
+            # A cache is untrusted input and build_and_save (below) is an
+            # unconditional rebuild fallback, so ANY load failure —
             # stale/corrupt/wrong-shaped/unsafe, or a RecursionError from a
             # deeply-nested JSON payload — is caught and rebuilt from source.
-            pass
+            g = None
+        if g is not None:
+            if not (verify_hash and _sources_changed(root)):
+                return g
+            # The cache loaded fine but the sources changed underneath it. A same
+            # -size, mtime-preserved edit fools incremental reuse (its first
+            # branch keys on size+mtime), so a full rebuild is the only correct
+            # answer here.
+            g, _ = build_and_save(root, incremental=False)
+            return g
     g, _ = build_and_save(root, incremental=True)
     return g
 

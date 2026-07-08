@@ -72,3 +72,15 @@ The Runtime executor is a subprocess with a **policy** deny-list (blocks
 **not** OS-level isolation. It inherits the host's credentials by design. This
 is labeled as a policy control, not a sandbox. Real isolation (bwrap/landlock/
 containers) is an explicit later layer, not an implied guarantee.
+
+Within that policy layer we still **fail closed**:
+
+- `eap_execute_file` cannot read a file → it refuses to run it
+  (`policy-scan-failed`), rather than running an unscanned file.
+- `eap_fetch` egress is scheme-allowlisted (http/https), **port**-allowlisted
+  (80/443 only — a non-default port such as `:6379` is `port-blocked`), and
+  **strips URL credentials** so no `Authorization: Basic` header is derived or
+  leaked; every rule is re-applied on each redirect hop, alongside the existing
+  SSRF IP guard.
+- The clean-room contamination gate treats a scan **error** (grep exit ≥2) as a
+  hard failure, not a silent pass.

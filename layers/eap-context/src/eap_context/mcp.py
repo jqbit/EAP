@@ -78,10 +78,25 @@ class Engine:
     def __init__(self, root: str = "."):
         self.root = root
         self._graph = None
+        self._graph_key = None  # (mtime_ns, size) of the cache file when loaded
+
+    @staticmethod
+    def _cache_key(root):
+        """(mtime_ns, size) of the graph cache file, or None if it is absent."""
+        try:
+            st = os.stat(graph_mod.cache_path(root))
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
 
     def graph(self):
-        if self._graph is None:
+        # Reload when the on-disk cache changed under us (C5): a rebuild by
+        # another process — or this engine's own build() — rewrites graph.json,
+        # so a graph pinned from a stale first load would hide new symbols.
+        key = self._cache_key(self.root)
+        if self._graph is None or key != self._graph_key:
             self._graph = graph_mod.load_or_build(self.root)
+            self._graph_key = self._cache_key(self.root)
         return self._graph
 
     # -- tool implementations -------------------------------------------------
@@ -112,6 +127,7 @@ class Engine:
         g, path = graph_mod.build_and_save(root, incremental=incremental)
         self.root = root
         self._graph = g
+        self._graph_key = self._cache_key(root)  # keep C5 reload in sync
         return {"cache": path, "incremental": incremental, **query_mod.stats(g)}
 
     def query(self, params: dict) -> dict:

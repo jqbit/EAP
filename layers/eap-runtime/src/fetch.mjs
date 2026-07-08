@@ -27,6 +27,9 @@ export const DEFAULT_FETCH_MAX_BYTES = 2 * 1024 * 1024;
 export const DEFAULT_FETCH_TTL_MS = 60_000;
 export const MAX_REDIRECTS = 5;
 const ALLOWED_SCHEMES = new Set(['http:', 'https:']);
+// Only the standard web ports. A non-default port (e.g. :6379 Redis, :22 SSH)
+// is a strong SSRF signal even when the host itself passes the IP guard.
+const ALLOWED_PORTS = new Set(['80', '443']);
 
 // ── IP classification ────────────────────────────────────────────────────────
 
@@ -316,6 +319,7 @@ export async function fetchUrl(url, {
   cache = MODULE_CACHE,
   guard = assessHostIp,
   resolve = null,
+  allowedPorts = ALLOWED_PORTS,
 } = {}) {
   const startUrl = String(url ?? '');
   let urlObj;
@@ -342,6 +346,16 @@ export async function fetchUrl(url, {
   while (true) {
     if (!ALLOWED_SCHEMES.has(urlObj.protocol)) {
       return { ok: false, error: 'scheme-blocked', reason: `redirect to disallowed scheme "${urlObj.protocol}"` };
+    }
+    // Strip credentials so node cannot derive an `Authorization: Basic` header
+    // (which would otherwise leak to the resolved IP, incl. across redirects).
+    if (urlObj.username || urlObj.password) {
+      urlObj.username = '';
+      urlObj.password = '';
+    }
+    // Reject non-standard ports (empty port = scheme default = allowed).
+    if (urlObj.port && !allowedPorts.has(urlObj.port)) {
+      return { ok: false, error: 'port-blocked', reason: `port ${urlObj.port} not allowed (80/443 only)` };
     }
     const v = await validateHost(urlObj, { guard, resolve });
     if (!v.ok) return { ok: false, error: 'ssrf-blocked', reason: v.reason };

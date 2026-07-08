@@ -468,8 +468,18 @@ export async function executeFile(path, {
     };
   }
 
-  let src = '';
-  try { src = readFileSync(p, 'utf8'); } catch { /* binary/unreadable: policy scan is best-effort */ }
+  // Fail closed: if we cannot read the file, we cannot apply the network
+  // policy, so we must NOT run it (a leftover empty src would let the scan pass
+  // and the file execute anyway — fail-open).
+  let src;
+  try {
+    src = readFileSync(p, 'utf8');
+  } catch {
+    return {
+      ok: false, error: 'policy-scan-failed',
+      message: 'Cannot read file to apply network policy; refusing to execute.',
+    };
+  }
   const policy = checkNetworkPolicy(src);
   if (!policy.allowed) {
     return {

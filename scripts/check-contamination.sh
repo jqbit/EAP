@@ -17,14 +17,21 @@ fail=0
 pattern='context-mode|mksglu|Koseoglu|Köseoğlu|Elastic-2\.0|Elastic License 2\.0|\bELv2\b'
 
 # 1. Scan SOURCE CODE only (not docs/markdown) for upstream identifiers.
+# Capture grep's real exit code: 0 = matches found (contamination -> FAIL),
+# 1 = no matches (clean -> pass), >=2 = grep itself errored (bad pattern,
+# unreadable tree) which we must treat as a HARD FAIL, not a silent pass.
+# The old `|| true` masked >=2 into a clean pass (fail-open).
 code_hits="$(grep -RInE "$pattern" . \
   --include='*.mjs' --include='*.cjs' --include='*.js' \
   --include='*.mts' --include='*.cts' --include='*.ts' \
   --include='*.jsx' --include='*.tsx' \
   --include='*.py' --include='*.json' \
   --exclude-dir=.git --exclude-dir=node_modules \
-  2>/dev/null || true)"
-if [ -n "$code_hits" ]; then
+  2>/dev/null)" && rc=0 || rc=$?
+if [ "$rc" -ge 2 ]; then
+  echo "FAIL: contamination scan errored (grep exit $rc); refusing to pass." >&2
+  fail=1
+elif [ "$rc" -eq 0 ] && [ -n "$code_hits" ]; then
   echo "FAIL: ELv2 upstream identifier found in SOURCE CODE (clean-room breach):" >&2
   echo "$code_hits" >&2
   fail=1

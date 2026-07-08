@@ -314,3 +314,21 @@ test('timeout reaps the whole process tree (no orphaned grandchild holds the pip
   fs.rmSync(dir, { recursive: true, force: true });
   assert.equal(alive, false, 'grandchild survived the timeout — process tree not reaped');
 });
+
+test('executeFile fails closed when the file cannot be read for the policy scan', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'eap-unreadable-'));
+  const file = path.join(dir, 'script.py');
+  // A well-formed, benign script — if it were executed it would print SENTINEL.
+  fs.writeFileSync(file, 'print("SENTINEL-SHOULD-NOT-RUN")\n');
+  fs.chmodSync(file, 0o000); // unreadable: the network-policy scan cannot read it
+  try {
+    const r = await executeFile(file, { language: 'python3' });
+    assert.equal(r.ok, false);
+    assert.equal(r.error, 'policy-scan-failed');
+    assert.ok(!('output' in r) || !String(r.output ?? '').includes('SENTINEL'),
+      'unreadable file must be refused, never executed');
+  } finally {
+    fs.chmodSync(file, 0o600);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

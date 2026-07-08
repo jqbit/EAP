@@ -1154,6 +1154,34 @@ class IncrementalIndexingTest(unittest.TestCase):
             g = graph.build(self.root, incremental=True)
             self.assertIn("load", {n["name"] for n in g.nodes.values()})
 
+    def test_incremental_hash_reuse_on_mtime_bump(self):
+        # C4: size + content byte-identical, only mtime bumped -> the sha guard
+        # reuses cached symbols instead of re-extracting. Pre-fix (sha written but
+        # never compared) the mtime bump forced a full re-extract of a.py.
+        graph.build_and_save(self.root)
+        os.utime(os.path.join(self.root, "a.py"), ns=(1, 1))  # bump mtime only
+        calls = self._spy_extract()
+        g = graph.build(self.root, incremental=True)
+        self.assertEqual(calls, [],
+                         f"content-identical mtime bump re-extracted: {calls}")
+        self.assertIn("load", {n["name"] for n in g.nodes.values()})
+
+    def test_load_or_build_detects_same_size_content_change(self):
+        # C4 (top-priority correctness): a cached graph must NOT be served when a
+        # file's CONTENT changed even though its byte-size AND mtime are
+        # unchanged. Pre-fix, load_or_build returned the stale cache blindly.
+        p = Path(self.root, "a.py")
+        p.write_text("def alpha():\n    return 1\n")
+        graph.build_and_save(self.root)  # cache holds `alpha`
+        st = os.stat(p)
+        p.write_text("def bravo():\n    return 1\n")  # SAME byte length
+        os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))  # restore old mtime
+        self.assertEqual(os.stat(p).st_size, st.st_size)  # size truly identical
+        g = graph.load_or_build(self.root)
+        names = {n["name"] for n in g.nodes.values()}
+        self.assertIn("bravo", names, "content change (same size+mtime) not picked up")
+        self.assertNotIn("alpha", names, "stale symbol survived the sha guard")
+
     def test_load_or_build_rebuild_is_incremental(self):
         # when the graph cache is missing, load_or_build rebuilds reusing the
         # fingerprint cache — only genuinely changed files are re-extracted.
@@ -1218,6 +1246,90 @@ class NewAlgorithmToolsTest(unittest.TestCase):
         res = self._payload("eap_graph_build", {"incremental": True})
         self.assertTrue(res["incremental"])
         self.assertGreater(res["nodes"], 0)
+
+
+class QueryCorrectnessAndPerfTest(unittest.TestCase):
+    """C1/C2/C3/C6 query fixes and C5 engine cache reload."""
+
+    def _build(self, files):
+        root = tempfile.mkdtemp(prefix="eap-qfix-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        for name, body in files.items():
+            Path(root, name).write_text(body)
+        return root, graph.build(root)
+
+    def test_god_nodes_exclude_module_nodes(self):
+        # C2: a big file's synthetic `module` node has the highest raw degree
+        # (one `defines` edge per symbol) but is structural noise, not a hub.
+        src = "".join(f"def f{i}():\n    return {i}\n\n" for i in range(12))
+        _, g = self._build({"m.py": src})
+        # threshold=1 forces every node past the hub cut, so only the module
+        # filter can keep the module node out.
+        gods = query.god_nodes(g, top=10, threshold=1)
+        ids = {n["id"] for n in gods}
+        self.assertNotIn("m.py", ids)  # module node id is the relpath
+        self.assertFalse(any(n["kind"] == "module" for n in gods))
+
+    def test_seed_selection_guarantees_each_query_token(self):
+        # C3: token 'handler' exact-matches 8 symbols (they crowd the score-
+        # sorted top slice); token 'payload' only substring-matches ONE symbol.
+        # Per-token coverage must still seed that payload node.
+        src = "".join(f"def handler_{c}(x):\n    return x\n\n"
+                      for c in "abcdefgh")
+        src += "def serialize_payloader(y):\n    return y\n"
+        _, g = self._build({"m.py": src})
+        res = query.query(g, "handler payload")
+        seed_names = {g.nodes[s]["name"] for s in res["seeds"]}
+        self.assertTrue(any("payload" in n for n in seed_names),
+                        f"substring-only token was not seeded: {seed_names}")
+        # sanity: the crowding term did seed too
+        self.assertTrue(any("handler" in n for n in seed_names), seed_names)
+
+    def test_query_stopwords_filtered(self):
+        # C6: stopwords must not drive seeding. 'work' would otherwise substring-
+        # match 'worker'; only 'cache' should seed.
+        _, g = self._build({"m.py":
+            "def cache_lookup(k):\n    return k\n\n"
+            "def worker():\n    return 1\n"})
+        scored = query.seed_scores(g, "how does the cache work")
+        names = [g.nodes[nid]["name"] for _, nid in scored]
+        self.assertTrue(names, "stopword-heavy query seeded nothing")
+        self.assertEqual(names[0], "cache_lookup")
+        self.assertNotIn("worker", names)
+        # a symbol literally named a stopword stays findable (node tokens are
+        # never filtered; all-stopword query falls back to unfiltered)
+        _, g2 = self._build({"n.py": "def work():\n    return 1\n"})
+        self.assertTrue(query.seed_scores(g2, "work"))
+
+    def test_query_memoization_is_stable_and_populated(self):
+        # C1: caches are pure functions of graph state -> byte-identical results
+        # across runs, and the cache dicts fill on first use.
+        _, g = self._build({"m.py": "def parse_entry(x):\n    return x\n"})
+        self.assertEqual(g._node_tokens_cache, {})
+        self.assertEqual(g._idf_cache, {})
+        r1 = query.query(g, "parse entry")
+        self.assertTrue(g._node_tokens_cache, "node-token cache not populated")
+        self.assertTrue(g._idf_cache, "idf cache not populated")
+        r2 = query.query(g, "parse entry")
+        self.assertEqual(r1, r2, "memoized query output drifted")
+
+    def test_engine_reloads_graph_on_cache_change(self):
+        # C5: the MCP engine must reload when the on-disk cache changes, or a
+        # symbol added by a later rebuild stays invisible to the pinned graph.
+        root = tempfile.mkdtemp(prefix="eap-reload-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        Path(root, "m.py").write_text("def alpha():\n    return 1\n")
+        graph.build_and_save(root)
+        engine = mcp.Engine(root)
+        r1 = engine.query({"query": "alpha"})
+        self.assertIn("alpha", {n["name"] for n in r1["nodes"]})
+        # rebuild with a new symbol (rewrites graph.json -> new mtime/size)
+        Path(root, "m.py").write_text(
+            "def alpha():\n    return 1\n\n\ndef beta():\n    return 2\n")
+        graph.build_and_save(root)
+        r2 = engine.query({"query": "beta"})
+        self.assertIn("beta", {n["name"] for n in r2["nodes"]},
+                      "engine served a stale graph after the cache changed")
 
 
 if __name__ == "__main__":

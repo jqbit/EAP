@@ -313,22 +313,57 @@ test('fetchUrl fetches a loopback server (guard-injected), reduces HTML, and cap
     else rs.end('plain');
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  const base = `http://127.0.0.1:${server.address().port}`;
+  const port = server.address().port;
+  const base = `http://127.0.0.1:${port}`;
   const allowLoopback = (ip) => (ip === '127.0.0.1' ? { blocked: false, family: 4 } : assessHostIp(ip));
+  // The port guard rejects non-80/443 by default; the ephemeral test port must
+  // be allowlisted explicitly (same injection pattern as `guard`).
+  const allowedPorts = new Set(['80', '443', String(port)]);
   clearFetchCache();
 
-  const html = await fetchUrl(`${base}/html`, { guard: allowLoopback });
+  const html = await fetchUrl(`${base}/html`, { guard: allowLoopback, allowedPorts });
   assert.equal(html.ok, true);
   assert.match(html.text, /# Report/);
   assert.match(html.text, /rows & cols/);
 
-  const capped = await fetchUrl(`${base}/big`, { guard: allowLoopback, maxBytes: 1000 });
+  const capped = await fetchUrl(`${base}/big`, { guard: allowLoopback, allowedPorts, maxBytes: 1000 });
   assert.equal(capped.truncated, true);
   assert.ok(capped.bytes <= 1000);
 
   // A redirect to an SSRF target is re-validated on the hop and blocked.
-  const redir = await fetchUrl(`${base}/redir`, { guard: allowLoopback });
+  const redir = await fetchUrl(`${base}/redir`, { guard: allowLoopback, allowedPorts });
   assert.equal(redir.error, 'ssrf-blocked');
+
+  server.close();
+});
+
+test('fetchUrl blocks non-standard ports before any DNS/connect (port allowlist)', async () => {
+  clearFetchCache();
+  // A public-looking IP that the guard would otherwise allow: the port check
+  // must fire first and return port-blocked without resolving/connecting.
+  let resolved = false;
+  const r = await fetchUrl('http://93.184.216.34:6379/', {
+    resolve: async () => { resolved = true; return [{ address: '93.184.216.34', family: 4 }]; },
+  });
+  assert.equal(r.error, 'port-blocked');
+  assert.equal(resolved, false, 'port check must precede DNS resolution');
+  // Default ports (implicit) remain allowed by the port gate.
+  assert.notEqual((await fetchUrl('http://127.0.0.1/')).error, 'port-blocked');
+});
+
+test('fetchUrl strips URL credentials so no Authorization header is derived', async () => {
+  const seen = [];
+  const server = http.createServer((rq, rs) => { seen.push(rq.headers.authorization); rs.end('ok'); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const port = server.address().port;
+  const allowLoopback = (ip) => (ip === '127.0.0.1' ? { blocked: false, family: 4 } : assessHostIp(ip));
+  const allowedPorts = new Set(['80', '443', String(port)]);
+  clearFetchCache();
+
+  const r = await fetchUrl(`http://user:pass@127.0.0.1:${port}/`, { guard: allowLoopback, allowedPorts });
+  assert.equal(r.ok, true);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0], undefined, 'no Authorization header may be derived from URL credentials');
 
   server.close();
 });

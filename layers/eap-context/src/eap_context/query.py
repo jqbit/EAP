@@ -31,6 +31,17 @@ FUZZY_MAX_DIST_LONG = 2    # edit budget for tokens 6+ chars
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
+# Natural-language filler dropped from a QUERY before scoring (C6): they carry
+# no code signal and otherwise substring-match noise ("work" -> "worker"). Only
+# ever filtered from the query; NODE tokens are never filtered, so a symbol
+# literally named "work"/"do"/"is" stays findable.
+QUERY_STOPWORDS = frozenset({
+    "how", "the", "a", "an", "is", "are", "was", "were", "be", "been",
+    "does", "do", "did", "of", "to", "for", "what", "where", "why", "when",
+    "which", "who", "and", "or", "in", "on", "at", "with", "that", "this",
+    "it", "its", "as", "by", "from", "work", "works", "working",
+})
+
 
 def tokenize(text: str) -> list[str]:
     """Lowercase word tokens; camelCase and snake_case both split."""
@@ -38,8 +49,13 @@ def tokenize(text: str) -> list[str]:
 
 
 def _node_tokens(g: SymbolGraph, nid: str) -> set[str]:
-    n = g.nodes[nid]
-    return set(tokenize(n["name"])) | set(tokenize(n["file"].rsplit("/", 1)[-1]))
+    cache = g._node_tokens_cache
+    toks = cache.get(nid)
+    if toks is None:
+        n = g.nodes[nid]
+        toks = set(tokenize(n["name"])) | set(tokenize(n["file"].rsplit("/", 1)[-1]))
+        cache[nid] = toks
+    return toks
 
 
 # ---------------------------------------------------------------------------
@@ -60,8 +76,12 @@ def god_node_threshold(g: SymbolGraph) -> int:
 def god_nodes(g: SymbolGraph, top: int = 10, threshold: int | None = None) -> list[dict]:
     """The most-connected symbols — what everything flows through."""
     thr = god_node_threshold(g) if threshold is None else threshold
+    # Exclude the synthetic per-file `module` nodes (C2): a module accrues a
+    # `defines` edge to every symbol it holds, so a big file's module node has a
+    # high raw degree that is structural noise, not a real hub.
     hubs = sorted(
-        ((g.degree(nid), nid) for nid in g.nodes if g.degree(nid) >= thr),
+        ((g.degree(nid), nid) for nid in g.nodes
+         if g.degree(nid) >= thr and g.nodes[nid]["kind"] != "module"),
         reverse=True,
     )[:top]
     return [
@@ -88,13 +108,17 @@ def build_trigram_index(g: SymbolGraph) -> dict[str, list[str]]:
 
     Used to prune fuzzy-match candidates on large graphs so bounded Levenshtein
     only runs against names that already share a 3-gram with the query token,
-    instead of every node. Built lazily (only when the fuzzy fallback fires).
+    instead of every node. Built lazily (only when the fuzzy fallback fires) and
+    memoized on the graph (C1) so repeated fuzzy queries share the one index.
     """
+    if g._trigram_index is not None:
+        return g._trigram_index
     idx: dict[str, list[str]] = defaultdict(list)
     for nid, n in g.nodes.items():
         short = n["name"].rsplit(".", 1)[-1].lower()
         for tg in _trigrams(short):
             idx[tg].append(nid)
+    g._trigram_index = idx
     return idx
 
 
@@ -176,42 +200,61 @@ def _fuzzy_scores(
 # ---------------------------------------------------------------------------
 
 
-def seed_scores(g: SymbolGraph, text: str) -> list[tuple[float, str]]:
-    """Score every node against the query: exact-token IDF + substring credit.
+def _seed_scores_detailed(
+    g: SymbolGraph, text: str,
+) -> tuple[list[tuple[float, str]], dict[str, tuple]]:
+    """Score nodes against the query; also record the best node per query token.
 
-    When exact/substring/prefix scoring yields fewer than FUZZY_MIN_SEEDS
-    candidates, a typo-tolerant fuzzy pass (trigram-pruned bounded Levenshtein)
-    is appended so a misspelled term still seeds the traversal. Fuzzy is only a
-    fallback: on any query that already matches enough symbols it never runs, so
-    exact-match ranking is unchanged.
+    Returns ``(scored, token_best)`` where ``scored`` is the sorted (score, nid)
+    list and ``token_best`` maps each query token that matched something to
+    ``(rank_key, nid)`` — its single best-matching node ranked by contribution
+    then node degree. ``token_best`` drives per-token seed coverage in query().
     """
-    q_tokens = [t for t in dict.fromkeys(tokenize(text)) if t]
-    if not q_tokens or not g.nodes:
-        return []
+    q_tokens_all = [t for t in dict.fromkeys(tokenize(text)) if t]
+    if not q_tokens_all or not g.nodes:
+        return [], {}
+    # C6: drop query-side stopwords before scoring; if the query is ALL
+    # stopwords, keep it unfiltered so a symbol literally named a stopword is
+    # still reachable. Node tokens are never filtered.
+    q_tokens = [t for t in q_tokens_all if t not in QUERY_STOPWORDS] or q_tokens_all
+
     node_tokens = {nid: _node_tokens(g, nid) for nid in g.nodes}
     total = len(g.nodes)
 
     idf: dict[str, float] = {}
     for t in q_tokens:
-        df = sum(1 for toks in node_tokens.values() if t in toks)
-        idf[t] = math.log((total + 1) / (df + 1)) + 1.0
+        # C1: IDF is a pure function of graph state, so memoize per token and
+        # only compute the terms not already cached on this graph.
+        v = g._idf_cache.get(t)
+        if v is None:
+            df = sum(1 for toks in node_tokens.values() if t in toks)
+            v = math.log((total + 1) / (df + 1)) + 1.0
+            g._idf_cache[t] = v
+        idf[t] = v
 
     scored: list[tuple[float, str]] = []
+    token_best: dict[str, tuple] = {}
     for nid, toks in node_tokens.items():
         name_lc = g.nodes[nid]["name"].lower()
         score = 0.0
         for t in q_tokens:
+            contrib = 0.0
             if t in toks:
-                score += idf[t]
+                contrib = idf[t]
             elif len(t) >= 3 and t in name_lc:
-                score += 0.5 * idf[t]
+                contrib = 0.5 * idf[t]
             elif len(t) >= 4 and any(
                 (tok.startswith(t) or t.startswith(tok))
                 and min(len(t), len(tok)) >= 4
                 for tok in toks
             ):
                 # prefix overlap: "pointers" ~ "pointer", "handler" ~ "handlers"
-                score += 0.4 * idf[t]
+                contrib = 0.4 * idf[t]
+            if contrib > 0:
+                score += contrib
+                key = (contrib, g.degree(nid))
+                if t not in token_best or key > token_best[t][0]:
+                    token_best[t] = (key, nid)
         if score > 0:
             # light preference for definitions over imports/modules
             if g.nodes[nid]["kind"] in ("function", "method", "class"):
@@ -223,7 +266,46 @@ def seed_scores(g: SymbolGraph, text: str) -> list[tuple[float, str]]:
         scored += _fuzzy_scores(g, q_tokens, idf, node_tokens, already)
 
     scored.sort(key=lambda p: (-p[0], p[1]))
-    return scored
+    return scored, token_best
+
+
+def seed_scores(g: SymbolGraph, text: str) -> list[tuple[float, str]]:
+    """Score every node against the query: exact-token IDF + substring credit.
+
+    When exact/substring/prefix scoring yields fewer than FUZZY_MIN_SEEDS
+    candidates, a typo-tolerant fuzzy pass (trigram-pruned bounded Levenshtein)
+    is appended so a misspelled term still seeds the traversal. Fuzzy is only a
+    fallback: on any query that already matches enough symbols it never runs, so
+    exact-match ranking is unchanged.
+    """
+    return _seed_scores_detailed(g, text)[0]
+
+
+def _select_seeds(scored: list[tuple[float, str]], token_best: dict[str, tuple]) -> list[str]:
+    """Pick BFS seeds (C3): the top node, everything within 20% of the top
+    score (capped at MAX_SEEDS), then a guaranteed best node for every query
+    token that matched — so a term that only substring-matches is never dropped.
+    """
+    if not scored:
+        return []
+    cutoff = scored[0][0] * 0.2
+    seeds: list[str] = []
+    seen: set[str] = set()
+    for score, nid in scored:  # sorted by score desc
+        if seeds and score < cutoff:
+            break
+        if len(seeds) >= MAX_SEEDS:
+            break
+        if nid not in seen:
+            seen.add(nid)
+            seeds.append(nid)
+    # every query token that scored > 0 contributes at least one of its best
+    # nodes, even if the score threshold / cap left it out.
+    for _t, (_key, nid) in token_best.items():
+        if nid not in seen:
+            seen.add(nid)
+            seeds.append(nid)
+    return seeds
 
 
 # ---------------------------------------------------------------------------
@@ -240,8 +322,8 @@ def query(
 ) -> dict:
     """Answer *text* with a compact subgraph + file:line pointers."""
     cap = god_node_threshold(g) if degree_cap is None else degree_cap
-    scored = seed_scores(g, text)
-    seeds = [nid for _, nid in scored[:MAX_SEEDS]]
+    scored, token_best = _seed_scores_detailed(g, text)
+    seeds = _select_seeds(scored, token_best)
     score_of = {nid: s for s, nid in scored}
 
     chosen: list[str] = []
