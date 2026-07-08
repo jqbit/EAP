@@ -102,9 +102,10 @@ test('real --only claude install lands Signal block + both MCP entries + hooks, 
     assert.equal(mcp.mcpServers['eap-context'].command, 'python3');
     assert.match(mcp.mcpServers['eap-context'].args[0], /eap_context\/mcp\.py$/);
 
-    // 3. Hooks wired for all four lifecycle events.
+    // 3. Hooks wired for all lifecycle events (UserPromptSubmit drives the
+    //    /eap lean|signal level switches).
     const settings = JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8'));
-    for (const ev of ['SessionStart', 'PreToolUse', 'PostToolUse', 'PreCompact']) {
+    for (const ev of ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PreCompact']) {
       assert.ok(settings.hooks[ev], `hook event ${ev} present`);
     }
     const dump = JSON.stringify(settings);
@@ -115,6 +116,12 @@ test('real --only claude install lands Signal block + both MCP entries + hooks, 
     const flags = JSON.parse(readFileSync(join(dir, '.eap.json'), 'utf8'));
     assert.equal(flags.runtime, true);
     assert.equal(flags.context, true);
+    assert.equal(flags.signalStatic, true);        // hook must not re-inject Signal
+
+    // EAP-Lean skills installed + discoverable.
+    for (const s of ['eap-lean-review', 'eap-lean-audit', 'eap-lean-debt']) {
+      assert.ok(existsSync(join(dir, 'skills', s, 'SKILL.md')), `${s} skill installed`);
+    }
 
     // ── uninstall ──
     const u = run(['--uninstall', '--config-dir', dir, '--non-interactive', '--no-color']);
@@ -134,6 +141,9 @@ test('real --only claude install lands Signal block + both MCP entries + hooks, 
     assert.ok(!(mcp2.mcpServers && mcp2.mcpServers['eap-context']), 'eap-context removed');
 
     assert.ok(!existsSync(join(dir, '.eap.json')), '.eap.json removed on uninstall');
+    for (const s of ['eap-lean-review', 'eap-lean-audit', 'eap-lean-debt']) {
+      assert.ok(!existsSync(join(dir, 'skills', s, 'SKILL.md')), `${s} skill removed on uninstall`);
+    }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

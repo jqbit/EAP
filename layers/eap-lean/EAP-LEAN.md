@@ -43,6 +43,10 @@ callers broken.
 Switch: `/eap lean lite|full|ultra|off` (where supported). Level persists until
 changed. "stop lean" / "normal mode" also reverts.
 
+## Persistence
+ACTIVE EVERY RESPONSE. No drift back to over-building or speculative structure.
+Still active if unsure. Off only: "stop lean" / "normal mode".
+
 ## Never lazy about (safety carve-outs — these override brevity)
 - Understanding the problem — the ladder shortens the solution, never the reading.
 - Input validation at every trust boundary.

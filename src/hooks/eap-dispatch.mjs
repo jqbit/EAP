@@ -18,6 +18,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import * as state from './eap-state.mjs';
 
 // Kept local (not imported from store.mjs) so the pure dispatcher carries no
 // node:sqlite dependency; the wrapper injects the real store. Mirrors
@@ -60,7 +61,17 @@ export async function dispatch(event, input, deps = {}) {
     case 'SessionStart':
       return safe(() => {
         const parts = [];
-        if (deps.signalRules) parts.push(String(deps.signalRules));
+        // Signal rules are emitted here ONLY when they are not already a static
+        // managed block in the agent's memory file (deps.signalStatic). Every
+        // current install path writes the static block, so the wrapper passes
+        // signalStatic:true and this is skipped — killing the double-injection.
+        if (deps.signalRules && !deps.signalStatic) parts.push(String(deps.signalRules));
+        // Active-level reminders — only when a non-default level is set, so a
+        // plain `full` session pays nothing (the static block already carries it).
+        const sig = deps.readMode ? deps.readMode('signal') : 'full';
+        const lean = deps.readMode ? deps.readMode('lean') : 'full';
+        if (sig !== 'full') parts.push(`EAP-Signal active level: **${sig}**${sig === 'off' ? ' — compression paused.' : '.'}`);
+        if (lean !== 'full') parts.push(`EAP-Lean active level: **${lean}**${lean === 'off' ? ' — ladder paused.' : '.'}`);
         if (runtime && runtime.session) {
           const snap = runtime.session.restore();
           if (snap && snap.body) parts.push('## EAP-Runtime resume (last session)\n\n' + snap.body);
@@ -69,7 +80,57 @@ export async function dispatch(event, input, deps = {}) {
           parts.push('EAP-Context symbol-graph MCP is available — call eap_graph_query for '
             + 'file:line pointers instead of reading whole files into context.');
         }
-        return { event, additionalContext: parts.join('\n\n') };
+        return parts.length ? { event, additionalContext: parts.join('\n\n') } : { event };
+      });
+
+    case 'UserPromptSubmit':
+      return safe(() => {
+        const prompt = input && typeof input === 'object'
+          ? (input.prompt || input.user_prompt || input.message || '') : '';
+        // Whole-message stop phrases revert to default (exact-match guard so
+        // "add a normal mode toggle" never disables a layer mid-task).
+        const deact = deps.parseDeactivate ? deps.parseDeactivate(prompt) : null;
+        if (deact) {
+          if (deps.clearMode) {
+            if (deact === 'both' || deact === 'lean') deps.clearMode('lean');
+            if (deact === 'both' || deact === 'signal') deps.clearMode('signal');
+          }
+          const which = deact === 'both' ? 'EAP-Signal + EAP-Lean' : (deact === 'lean' ? 'EAP-Lean' : 'EAP-Signal');
+          return { event, additionalContext: `${which} reverted to default (full).` };
+        }
+        const sw = deps.parseSwitch ? deps.parseSwitch(prompt) : null;
+        if (sw && sw.mode) {
+          if (deps.setMode) deps.setMode(sw.kind, sw.mode);
+          const layer = sw.kind === 'lean' ? 'EAP-LEAN' : 'EAP-SIGNAL';
+          return { event, additionalContext: `${layer} LEVEL CHANGED — level: ${sw.mode}. Apply it every response until changed.` };
+        }
+        if (sw) { // bare `/eap lean` or `/eap signal` — report current level
+          const cur = deps.readMode ? deps.readMode(sw.kind) : 'full';
+          return { event, additionalContext: `${sw.kind === 'lean' ? 'EAP-Lean' : 'EAP-Signal'} active level: ${cur}.` };
+        }
+        // Per-turn reinforcement only for non-default active levels.
+        const notes = [];
+        const sig = deps.readMode ? deps.readMode('signal') : 'full';
+        const lean = deps.readMode ? deps.readMode('lean') : 'full';
+        if (sig !== 'full') notes.push(`Signal:${sig}`);
+        if (lean !== 'full') notes.push(`Lean:${lean}`);
+        return notes.length ? { event, additionalContext: `EAP active — ${notes.join(' ')}.` } : { event };
+      });
+
+    case 'SubagentStart':
+      return safe(() => {
+        // Subagents do not inherit the parent's memory-file block, so inject the
+        // rule bodies here, scoped to the active level (ponytail issue #252).
+        const sig = deps.readMode ? deps.readMode('signal') : 'full';
+        const lean = deps.readMode ? deps.readMode('lean') : 'full';
+        const parts = [];
+        if (deps.signalRules && sig !== 'off') {
+          parts.push((sig !== 'full' ? `EAP-Signal — apply the **${sig}** level:\n\n` : '') + String(deps.signalRules));
+        }
+        if (deps.leanRules && lean !== 'off') {
+          parts.push((lean !== 'full' ? `EAP-Lean — apply the **${lean}** level:\n\n` : '') + String(deps.leanRules));
+        }
+        return parts.length ? { event, additionalContext: parts.join('\n\n') } : { event };
       });
 
     case 'PreToolUse':
@@ -158,15 +219,30 @@ async function run() {
     const ev = event || input.hook_event_name || '';
 
     let signalRules = '';
-    if (ev === 'SessionStart') {
+    let leanRules = '';
+    // Signal body is needed for SessionStart (level notes) and SubagentStart
+    // (full inject); Lean body only for SubagentStart.
+    if (ev === 'SessionStart' || ev === 'SubagentStart') {
       try { signalRules = fs.readFileSync(path.join(cfg.root, 'layers', 'eap-signal', 'EAP-SIGNAL.md'), 'utf8').trim(); } catch { /* optional */ }
+    }
+    if (ev === 'SubagentStart' && cfg.lean !== false) {
+      try { leanRules = fs.readFileSync(path.join(cfg.root, 'layers', 'eap-lean', 'EAP-LEAN.md'), 'utf8').trim(); } catch { /* optional */ }
     }
     if (ev === 'SessionStart' || ev === 'PostToolUse' || ev === 'PreCompact') runtime = await buildRuntime(cfg);
 
     const result = await dispatch(ev, input, {
       signalRules,
+      leanRules,
+      // Installer writes Signal as a static managed block in the memory file, so
+      // the hook must not re-emit it on SessionStart (avoids double-injection).
+      signalStatic: cfg.signalStatic !== false,
       runtime,
       contextAvailable: !!cfg.context,
+      readMode: state.readMode,
+      setMode: state.setMode,
+      clearMode: state.clearMode,
+      parseSwitch: state.parseSwitch,
+      parseDeactivate: state.parseDeactivate,
       now: () => Date.now(),
     });
 

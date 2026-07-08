@@ -42,6 +42,8 @@ const RUNTIME_MCP = path.join(REPO_ROOT, 'layers', 'eap-runtime', 'src', 'mcp.mj
 const CONTEXT_MCP = path.join(REPO_ROOT, 'layers', 'eap-context', 'src', 'eap_context', 'mcp.py');
 const SIGNAL_RULE = path.join(REPO_ROOT, 'layers', 'eap-signal', 'EAP-SIGNAL.md');
 const LEAN_RULE = path.join(REPO_ROOT, 'layers', 'eap-lean', 'EAP-LEAN.md');
+const LEAN_SKILLS_SRC = path.join(REPO_ROOT, 'layers', 'eap-lean', 'skills');
+const LEAN_SKILLS = ['eap-lean-review', 'eap-lean-audit', 'eap-lean-debt'];
 const HOOK_DISPATCH = path.join(REPO_ROOT, 'src', 'hooks', 'eap-dispatch.mjs');
 
 // Managed-block markers (Signal rule) and the hook idempotency marker.
@@ -84,6 +86,7 @@ const HOOK_MARKER = 'eap-dispatch';
 // Claude Code hook events EAP wires (see src/hooks/eap-dispatch.mjs).
 const HOOK_EVENTS = [
   { event: 'SessionStart', matcher: null, timeout: 10 },
+  { event: 'UserPromptSubmit', matcher: null, timeout: 5 },
   { event: 'PreToolUse', matcher: 'Read|Grep|Glob', timeout: 5 },
   { event: 'PostToolUse', matcher: null, timeout: 10 },
   { event: 'PreCompact', matcher: null, timeout: 10 },
@@ -371,6 +374,40 @@ function resolveNativeSignal(prov) {
 }
 
 // ── Claude Code install (END-TO-END) ────────────────────────────────────────
+// Copy the three EAP-Lean skills (review/audit/debt) into <configDir>/skills/ so
+// they are discoverable to the agent. Prompt-only markdown; symlink-safe atomic
+// write. Returns an error string on failure, null on success/dry-run.
+function installLeanSkills(configDir, opts) {
+  try {
+    for (const name of LEAN_SKILLS) {
+      const src = path.join(LEAN_SKILLS_SRC, name, 'SKILL.md');
+      if (!fs.existsSync(src)) continue;
+      const destDir = path.join(configDir, 'skills', name);
+      if (opts.dryRun) continue;
+      fs.mkdirSync(destDir, { recursive: true });
+      atomicWrite(path.join(destDir, 'SKILL.md'), fs.readFileSync(src, 'utf8'), 0o644);
+    }
+    return null;
+  } catch (e) { return e.message; }
+}
+
+// Remove installer-placed EAP-Lean skills; leave any user files in those dirs.
+function uninstallLeanSkills(configDir, opts) {
+  let removed = 0;
+  for (const name of LEAN_SKILLS) {
+    const dir = path.join(configDir, 'skills', name);
+    const file = path.join(dir, 'SKILL.md');
+    if (!fs.existsSync(file)) continue;
+    if (opts.dryRun) { removed++; continue; }
+    try {
+      fs.unlinkSync(file);
+      try { fs.rmdirSync(dir); } catch { /* keep dir if user left other files */ }
+      removed++;
+    } catch { /* best effort */ }
+  }
+  return removed;
+}
+
 function installClaude(ctx) {
   const { opts, configDir, say, note, ok, warn, results } = ctx;
   const claudeMd = path.join(configDir, 'CLAUDE.md');
@@ -412,6 +449,16 @@ function installClaude(ctx) {
     const err = writeRulesBlocks(claudeMd, signalBody, leanBody);
     if (err) { warn(`  [1/3] rules write failed (${claudeMd}): ${err}`); results.failed.push(['claude-rules', err]); }
     else ok(`  [1/3] Signal${leanBody != null ? ' + Lean' : ''} rule written to ${claudeMd}`);
+  }
+
+  // 1b. EAP-Lean skills (review/audit/debt) → <configDir>/skills/ so /eap-lean-*
+  // is discoverable. Prompt-only markdown; gated by opts.lean.
+  if (opts.lean && !opts.dryRun) {
+    const sErr = installLeanSkills(configDir, opts);
+    if (sErr) warn(`  [1/3] EAP-Lean skills install failed: ${sErr}`);
+    else ok(`  [1/3] EAP-Lean skills (${LEAN_SKILLS.length}) installed to ${path.join(configDir, 'skills')}`);
+  } else if (opts.lean) {
+    note(`  [1/3] EAP-Lean skills: copy ${LEAN_SKILLS.length} into ${path.join(configDir, 'skills')}`);
   }
 
   // 2. MCP servers.
@@ -476,7 +523,7 @@ function installClaude(ctx) {
   }
 
   // Layer flags for the dispatcher (runtime/context enable state + repo root).
-  const flagsErr = tryWrite(() => writeSettings(eapConfPath, { root: REPO_ROOT, runtime: opts.runtime, context: opts.context, lean: opts.lean, version: 1 }));
+  const flagsErr = tryWrite(() => writeSettings(eapConfPath, { root: REPO_ROOT, runtime: opts.runtime, context: opts.context, lean: opts.lean, signalStatic: true, version: 1 }));
   if (flagsErr) { warn(`  layer-flags write failed (${eapConfPath}): ${flagsErr}`); results.failed.push(['claude-flags', flagsErr]); }
 
   results.installed.push('claude');
@@ -679,7 +726,9 @@ function uninstallMcpNative(ctx, prov) {
     for (const n of names) if (cfg[desc.key][n]) { delete cfg[desc.key][n]; removed++; }
     if (removed === 0) return;
     if (Object.keys(cfg[desc.key]).length === 0) delete cfg[desc.key];
-    if (!opts.dryRun) writeSettings(file, cfg);
+    // If the installer created this file and nothing else remains, delete the
+    // empty {} stub rather than leaving it behind (parity with the claude path).
+    if (!opts.dryRun && !removeInstallerCreatedEmpty(file, cfg)) writeSettings(file, cfg);
     ok(`  removed ${removed} EAP MCP entr${removed === 1 ? 'y' : 'ies'} from ${prov.label} (${file})`);
   }
 }
@@ -717,6 +766,10 @@ function uninstall(ctx) {
     }
     if (stripped) ok(text === '' ? `  removed ${claudeMd}` : `  stripped EAP blocks from ${claudeMd}`);
   }
+
+  // 1b. EAP-Lean skills.
+  const skillsRemoved = uninstallLeanSkills(configDir, opts);
+  if (skillsRemoved) ok(`  removed ${skillsRemoved} EAP-Lean skill(s) from ${path.join(configDir, 'skills')}`);
 
   // 2. MCP servers. Remove at --scope user to match the install scope.
   if (useCli) {
