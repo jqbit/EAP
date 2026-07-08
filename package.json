@@ -23,6 +23,6 @@
   ],
   "files": [
     "EAP.md", "LICENSE", "NOTICE", "README.md", "install.sh", "install.ps1",
-    "layers/", "docs/", "bench/", "scripts/", "bin/", "src/"
+    "layers/", "layers/eap-lean/", "docs/", "bench/", "scripts/", "bin/", "src/"
   ]
 }

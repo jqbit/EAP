@@ -15,9 +15,21 @@ design (drop the persona, keep the compression) is documented in TLDR's
 
 - **caveman** — https://github.com/JuliusBrussee/caveman — MIT, © 2026 Julius Brussee.
 - **ponytail** by Dietrich Gebert — https://github.com/DietrichGebert/ponytail — MIT.
-  EAP borrows ponytail's *concept* of a code-brevity discipline (the "ladder":
-  YAGNI → reuse → stdlib → native → dep → one line → minimum) as an optional
-  Signal sub-mode. Concept only; no ponytail source is used.
+  EAP-Lean (`layers/eap-lean/`) is a **concept-derived, clean-room code-brevity
+  discipline** whose spine is ponytail's *concept* of a decision ladder (YAGNI →
+  reuse an in-repo helper → stdlib → native → installed dep → one line →
+  minimum), plus the review tag vocabulary (`delete`/`stdlib`/`native`/`yagni`/
+  `shrink`), the `net: -N lines` scoring, the deliberate-simplification comment
+  convention (renamed `ponytail:` → `eap-lean:`), and ponytail's safety
+  carve-outs (understanding, input validation, data-loss error handling,
+  security, accessibility, hardware calibration, one runnable check). **Concept
+  only — no ponytail source code, prose, or examples are used;** the rule text,
+  skills, and examples are written fresh in EAP's own words. ponytail was cloned
+  solely to study its ladder and rules and re-express them faithfully. ponytail
+  is MIT, so this is licence-compatible either way; EAP stays concept-only to
+  preserve its "100% original / clean-room, zero third-party source" invariant.
+  EAP-Lean is a peer of EAP-Signal (Signal shrinks the prose; Lean shrinks the
+  code), prompt-only and always-on.
 
 ## EAP-Context (input / retrieval)
 

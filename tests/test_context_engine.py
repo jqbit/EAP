@@ -20,7 +20,7 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parents[1] / "layers" / "eap-context" / "src"
 sys.path.insert(0, str(SRC))
 
-from eap_context import extract, graph, mcp, query  # noqa: E402
+from eap_context import algorithms, extract, graph, mcp, query  # noqa: E402
 
 ALPHA_PY = '''\
 """Fixture: config loading."""
@@ -264,7 +264,8 @@ class ContextEngineTest(unittest.TestCase):
         names = {t["name"] for t in res["result"]["tools"]}
         self.assertEqual(names, {
             "eap_graph_query", "eap_graph_build", "eap_graph_neighbors",
-            "eap_graph_stats", "eap_graph_godnodes"})
+            "eap_graph_stats", "eap_graph_godnodes", "eap_graph_path",
+            "eap_graph_communities", "eap_graph_central"})
 
     # -- security regressions ------------------------------------------------
     # Each test below fails against the pre-hardening code and locks in a fix
@@ -407,6 +408,29 @@ class ContextEngineTest(unittest.TestCase):
 
         self.assertEqual(nb({"node": "x", "direction": "sideways"}), -32602)
         self.assertEqual(nb({"node": 5}), -32602)                    # non-string node
+
+    def test_mcp_tools_call_rejects_non_dict_arguments(self):
+        # A truthy non-dict `arguments` under tools/call previously reached the
+        # tool impl and raised AttributeError -> -32603 INTERNAL_ERROR. It is a
+        # client error: validate at dispatch and return -32602 INVALID_PARAMS.
+        engine = mcp.Engine(self.root)
+
+        def call(arguments):
+            r = mcp.handle_request(
+                {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                 "params": {"name": "eap_graph_path", "arguments": arguments}},
+                engine)
+            return r.get("error", {}).get("code")
+
+        self.assertEqual(call([1, 2, 3]), -32602)     # list
+        self.assertEqual(call("string"), -32602)      # string
+        self.assertEqual(call(42), -32602)            # int
+        # Absent/empty arguments still succeed (default to {}); missing required
+        # tool args become a tool-level error, not a dispatch crash.
+        ok = mcp.handle_request(
+            {"jsonrpc": "2.0", "id": 10, "method": "tools/call",
+             "params": {"name": "eap_graph_stats"}}, engine)
+        self.assertNotIn("error", ok)
 
     def test_function_def_regex_stays_linear(self):
         # ReDoS regression (Fix 1): the old JS "function" pattern
@@ -647,7 +671,553 @@ class ContextEngineTest(unittest.TestCase):
                 tools = {t["name"] for t in obj["result"]["tools"]}
         self.assertIn("eap_graph_query", tools)
         self.assertIn("eap_graph_build", tools)
-        self.assertEqual(len(tools), 5)
+        self.assertIn("eap_graph_path", tools)
+        self.assertIn("eap_graph_communities", tools)
+        self.assertIn("eap_graph_central", tools)
+        self.assertEqual(len(tools), 8)
+
+
+# ===========================================================================
+# New-capability regressions: languages, graph algorithms, fuzzy, incremental.
+# ===========================================================================
+
+# Per-language fixtures. Each exercises functions/classes/methods, imports, and
+# an intra-file reference so the ref-slice collector is covered too.
+RUST_SRC = '''\
+use std::collections::HashMap;
+use crate::util::{helper, other};
+
+pub fn compute(x: i32) -> i32 {
+    helper(x)
+}
+
+async fn fetch() -> u32 { 0 }
+
+pub struct Widget {
+    count: u32,
+}
+
+enum Color { Red, Green }
+
+trait Drawable {
+    fn draw(&self);
+}
+'''
+
+JAVA_SRC = '''\
+package com.example;
+
+import java.util.List;
+import static java.lang.Math.PI;
+
+public class Service {
+    public void run() {
+        helper();
+    }
+    private static int add(int a, int b) {
+        return a + b;
+    }
+    public Service() {}
+}
+
+interface Repository {}
+'''
+
+C_SRC = '''\
+#include <stdio.h>
+#include "local.h"
+
+int main(int argc, char **argv) {
+    return compute(argc);
+}
+
+static void helper(void) {
+    printf("hi");
+}
+
+struct Point { int x; };
+'''
+
+CPP_SRC = '''\
+#include <vector>
+
+class Widget : public Base {
+public:
+    void refresh();
+};
+
+void Widget::refresh() {
+    render();
+}
+
+int Foo::bar() {
+    return baz();
+}
+'''
+
+CS_SRC = '''\
+using System;
+using System.Collections.Generic;
+
+namespace App {
+    public class Service {
+        public void Run() {
+            Helper();
+        }
+        private static int Add(int a, int b) {
+            return a + b;
+        }
+    }
+}
+'''
+
+RUBY_SRC = '''\
+require 'json'
+require_relative 'foo/bar'
+
+class Store < Base
+  def save(entry)
+    parse(entry)
+  end
+
+  def self.build
+  end
+end
+
+module Helpers
+end
+'''
+
+PHP_SRC = '''\
+<?php
+namespace App;
+
+use App\\Models\\User;
+
+class Service extends Base {
+    public function run() {
+        $this->helper();
+    }
+    private function add($a, $b) {
+        return $a + $b;
+    }
+}
+
+interface Repository {}
+'''
+
+
+class NewLanguageExtractionTest(unittest.TestCase):
+    """Each new regex language extracts functions/classes/imports/refs and stays
+    linear-time on adversarial input (the same discipline as the JS/Go pair)."""
+
+    def _symbols(self, name, src):
+        d = tempfile.mkdtemp(prefix="eap-lang-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        Path(d, name).write_text(src)
+        return extract.extract_file(os.path.join(d, name), name)
+
+    def _extract(self, name, src):
+        return {s["name"]: s for s in self._symbols(name, src)}
+
+    def _assert_linear(self, name, adversarial):
+        # each new extractor must finish an adversarial input well under a
+        # generous ceiling — a re-introduced backtracking pattern blows past it.
+        d = tempfile.mkdtemp(prefix="eap-lang-redos-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        Path(d, name).write_text(adversarial)
+        start = time.perf_counter()
+        extract.extract_file(os.path.join(d, name), name)
+        self.assertLess(time.perf_counter() - start, 2.0,
+                        f"{name} extractor is super-linear (ReDoS)")
+
+    def test_rust(self):
+        by = self._extract("m.rs", RUST_SRC)
+        self.assertEqual(by["compute"]["kind"], "function")
+        self.assertEqual(by["fetch"]["kind"], "function")
+        self.assertEqual(by["Widget"]["kind"], "class")
+        self.assertEqual(by["Color"]["kind"], "class")
+        self.assertEqual(by["Drawable"]["kind"], "class")
+        self.assertIn("helper", by["compute"]["refs"])
+        self.assertEqual(by["HashMap"]["kind"], "import")
+        # `use crate::util::{...}` keeps the module segment `util`
+        self.assertIn("util", by)
+        # newline flood + wide keyword lines both stay linear
+        self._assert_linear("m.rs", "fn\n" + "\n" * 20000)
+        self._assert_linear("m2.rs", "\n".join("pub " * 490 for _ in range(400)))
+
+    def test_java(self):
+        syms = self._symbols("M.java", JAVA_SRC)
+        by = {s["name"]: s for s in syms}
+        # `Service` is both a class and its constructor (a method) — both extract
+        kinds = {(s["name"], s["kind"]) for s in syms}
+        self.assertIn(("Service", "class"), kinds)
+        self.assertIn(("Service", "method"), kinds)   # the constructor
+        self.assertEqual(by["run"]["kind"], "method")
+        self.assertEqual(by["add"]["kind"], "method")
+        self.assertEqual(by["Repository"]["kind"], "class")
+        self.assertIn("helper", by["run"]["refs"])
+        self.assertEqual(by["List"]["kind"], "import")
+        self.assertIn("PI", by)  # import static ...Math.PI
+        self._assert_linear("M.java", "public\n" + "\n" * 20000)
+        self._assert_linear("M2.java",
+                            "\n".join("public static final abstract" for _ in range(20000)))
+
+    def test_c(self):
+        by = self._extract("m.c", C_SRC)
+        self.assertEqual(by["main"]["kind"], "function")
+        self.assertEqual(by["helper"]["kind"], "function")
+        self.assertEqual(by["Point"]["kind"], "class")
+        self.assertIn("compute", by["main"]["refs"])
+        self.assertEqual(by["stdio"]["kind"], "import")
+        self.assertIn("local", by)
+        # the historically dangerous case: a return-type word + long space run
+        # with no name/paren must not go O(n^2).
+        self._assert_linear("m.c", "\n".join("int" + " " * 1900 for _ in range(400)))
+        self._assert_linear("m2.c", "\n".join("a b c d e f g h" for _ in range(20000)))
+
+    def test_cpp(self):
+        by = self._extract("m.cpp", CPP_SRC)
+        self.assertEqual(by["Widget"]["kind"], "class")
+        # out-of-line member definitions keep their Class:: qualifier
+        self.assertEqual(by["Widget::refresh"]["kind"], "function")
+        self.assertEqual(by["Foo::bar"]["kind"], "function")
+        self.assertIn("render", by["Widget::refresh"]["refs"])
+        self.assertEqual(by["vector"]["kind"], "import")
+        self._assert_linear("m.cpp", "\n".join("int" + " *" * 950 for _ in range(400)))
+
+    def test_csharp(self):
+        by = self._extract("M.cs", CS_SRC)
+        self.assertEqual(by["Service"]["kind"], "class")
+        self.assertEqual(by["Run"]["kind"], "method")
+        self.assertEqual(by["Add"]["kind"], "method")
+        self.assertIn("Helper", by["Run"]["refs"])
+        self.assertEqual(by["Generic"]["kind"], "import")  # using System.Collections.Generic
+        self._assert_linear("M.cs", "\n".join("public " * 280 for _ in range(400)))
+
+    def test_ruby(self):
+        by = self._extract("m.rb", RUBY_SRC)
+        self.assertEqual(by["Store"]["kind"], "class")
+        self.assertEqual(by["save"]["kind"], "method")
+        self.assertEqual(by["build"]["kind"], "method")  # def self.build
+        self.assertEqual(by["Helpers"]["kind"], "class")  # module
+        self.assertIn("parse", by["save"]["refs"])
+        self.assertIn("Base", by["Store"]["refs"])       # class Store < Base
+        self.assertEqual(by["json"]["kind"], "import")
+        self.assertIn("bar", by)                          # require_relative 'foo/bar'
+        self._assert_linear("m.rb", "\n".join("def a" for _ in range(20000)))
+
+    def test_php(self):
+        by = self._extract("m.php", PHP_SRC)
+        self.assertEqual(by["Service"]["kind"], "class")
+        self.assertEqual(by["run"]["kind"], "function")
+        self.assertEqual(by["add"]["kind"], "function")
+        self.assertEqual(by["Repository"]["kind"], "class")
+        self.assertIn("Base", by["Service"]["refs"])     # class Service extends Base
+        self.assertEqual(by["User"]["kind"], "import")   # use App\Models\User
+        self._assert_linear("m.php", "\n".join("function" + " " * 1900 for _ in range(400)))
+        self._assert_linear("m2.php", "\n".join("public " * 280 for _ in range(400)))
+
+    def test_new_languages_are_indexed_end_to_end(self):
+        # a mixed-language tree builds a graph whose symbols span every new lang.
+        root = tempfile.mkdtemp(prefix="eap-multilang-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        for name, src in (("m.rs", RUST_SRC), ("M.java", JAVA_SRC), ("m.c", C_SRC),
+                          ("m.cpp", CPP_SRC), ("M.cs", CS_SRC), ("m.rb", RUBY_SRC),
+                          ("m.php", PHP_SRC)):
+            Path(root, name).write_text(src)
+        g = graph.build(root)
+        names = {n["name"] for n in g.nodes.values()}
+        for want in ("compute", "Service", "main", "Widget::refresh", "Run",
+                     "Store", "add"):
+            self.assertIn(want, names)
+        # every new extension reached CODE_EXTENSIONS + dispatch
+        for ext in (".rs", ".java", ".c", ".h", ".cpp", ".cc", ".cxx",
+                    ".hpp", ".hh", ".hxx", ".cs", ".rb", ".php"):
+            self.assertIn(ext, extract.CODE_EXTENSIONS)
+
+
+class GraphAlgorithmsTest(unittest.TestCase):
+    """shortest_path / communities / centrality on a known two-clique fixture:
+    cliques A={a1,a2,a3} and B={b1,b2,b3}, each a triangle, joined by one bridge
+    a1--b1, plus an isolated node."""
+
+    def _fixture(self):
+        g = graph.SymbolGraph()
+        for nid in ("a1", "a2", "a3", "b1", "b2", "b3", "iso"):
+            g.add_node(nid, nid, "function", nid + ".py", 1)
+
+        def link(s, t):
+            g.add_edge(s, t, "calls", "EXTRACTED")
+
+        link("a1", "a2"); link("a2", "a3"); link("a1", "a3")
+        link("b1", "b2"); link("b2", "b3"); link("b1", "b3")
+        link("a1", "b1")  # the only bridge
+        return g
+
+    def test_shortest_path(self):
+        g = self._fixture()
+        res = algorithms.shortest_path(g, "a3", "b3")
+        self.assertTrue(res["found"])
+        self.assertEqual(res["length"], 3)
+        self.assertEqual([p["id"] for p in res["path"]], ["a3", "a1", "b1", "b3"])
+        # pointers are file:line strings, never source text
+        for p in res["pointers"]:
+            self.assertRegex(p, r"^[\w./-]+:\d+  \S")
+        # same node -> zero-length path
+        self.assertEqual(algorithms.shortest_path(g, "a1", "a1")["length"], 0)
+        # unreachable -> found False (not a crash)
+        self.assertFalse(algorithms.shortest_path(g, "a1", "iso")["found"])
+        # unknown symbol -> found False with a reason
+        miss = algorithms.shortest_path(g, "a1", "nope")
+        self.assertFalse(miss["found"])
+        self.assertIn("nope", miss["error"])
+
+    def test_communities(self):
+        g = self._fixture()
+        res = algorithms.communities(g)
+        nc = res["node_community"]
+        # each clique is one community; the single bridge does not merge them
+        self.assertEqual(nc["a1"], nc["a2"])
+        self.assertEqual(nc["a2"], nc["a3"])
+        self.assertEqual(nc["b1"], nc["b2"])
+        self.assertEqual(nc["b2"], nc["b3"])
+        self.assertNotEqual(nc["a1"], nc["b1"])
+        self.assertNotIn(nc["iso"], (nc["a1"], nc["b1"]))  # isolated -> own community
+        # deterministic across runs
+        self.assertEqual(json.dumps(algorithms.communities(g)),
+                         json.dumps(algorithms.communities(g)))
+
+    def test_centrality(self):
+        g = self._fixture()
+        res = algorithms.centrality(g, top=7)
+        self.assertEqual(res["method"], "betweenness")  # small graph
+        top2 = {res["central"][0]["id"], res["central"][1]["id"]}
+        self.assertEqual(top2, {"a1", "b1"})  # the bridge endpoints
+        # explicit degree method + determinism
+        deg = algorithms.centrality(g, top=3, method="degree")
+        self.assertEqual(deg["method"], "degree")
+        self.assertEqual(json.dumps(algorithms.centrality(g, top=7)),
+                         json.dumps(algorithms.centrality(g, top=7)))
+        # the node-count guard forces degree fallback above the cap
+        self.assertLessEqual(algorithms.BETWEENNESS_NODE_CAP, 100000)
+
+
+class FuzzySeedTest(unittest.TestCase):
+    """A misspelled query term still seeds via bounded Levenshtein over a
+    trigram-pruned candidate set — but only as a fallback."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="eap-fuzzy-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        Path(self.root, "m.py").write_text(
+            "def configure_widget(opts):\n    return opts\n\n"
+            "def serialize_payload(x):\n    return x\n\n"
+            "class InventoryManager:\n    def rebalance(self):\n        pass\n")
+        self.graph = graph.build(self.root)
+
+    def _seed_names(self, text):
+        scored = query.seed_scores(self.graph, text)
+        return [self.graph.nodes[nid]["name"] for _, nid in scored]
+
+    def test_typo_still_seeds(self):
+        # 'confgure' (dropped 'i') is edit-distance 1 from 'configure'
+        names = self._seed_names("confgure")
+        self.assertTrue(any("configure" in n for n in names),
+                        f"typo did not seed: {names}")
+        # a distance-1 typo on a CamelCase name token
+        names2 = self._seed_names("inventorymanger")
+        self.assertTrue(any("Inventory" in n for n in names2), names2)
+
+    def test_exact_query_does_not_use_fuzzy(self):
+        # an exact/substring query returns the real match and is unchanged by the
+        # fuzzy fallback (which only fires when seeds are scarce).
+        names = self._seed_names("configure widget")
+        self.assertIn("configure_widget", names)
+
+    def test_garbage_token_seeds_nothing(self):
+        # far-from-everything token must not manufacture a bogus seed
+        self.assertEqual(self._seed_names("zzzxqwvk"), [])
+
+    def test_bounded_levenshtein(self):
+        self.assertEqual(query._bounded_levenshtein("kitten", "sitting", 3), 3)
+        self.assertEqual(query._bounded_levenshtein("abc", "abc", 2), 0)
+        # cap: once the budget is blown it returns max_dist + 1, not the true cost
+        self.assertEqual(query._bounded_levenshtein("abcdef", "uvwxyz", 2), 3)
+
+    def test_trigram_index_prunes(self):
+        idx = query.build_trigram_index(self.graph)
+        self.assertIn("con", idx)  # from configure_widget
+        # the index values are node ids; the configure_widget node is reachable
+        # from its own trigrams
+        hits = [nid for ids in idx.values() for nid in ids
+                if "configure_widget" in nid]
+        self.assertTrue(hits)
+
+
+class IncrementalIndexingTest(unittest.TestCase):
+    """Incremental re-index re-extracts only changed files and yields a graph
+    byte-identical to a full build."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="eap-incr-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        Path(self.root, "a.py").write_text(
+            "import json\n\ndef load(p):\n    return json.load(p)\n")
+        Path(self.root, "b.py").write_text(
+            "from a import load\n\ndef run():\n    return load('x')\n")
+        Path(self.root, "c.py").write_text("def util():\n    return 1\n")
+
+    def _spy_extract(self):
+        calls = []
+        orig = extract.extract_file_hashed
+
+        def spy(path, rel=None):
+            calls.append(rel)
+            return orig(path, rel)
+
+        extract.extract_file_hashed = spy
+        self.addCleanup(setattr, extract, "extract_file_hashed", orig)
+        return calls
+
+    @staticmethod
+    def _edge_set(g):
+        return {(e["source"], e["target"], e["relation"]) for e in g.edges}
+
+    def test_unchanged_tree_reextracts_nothing(self):
+        graph.build_and_save(self.root)  # seed the fingerprint cache
+        self.assertTrue(os.path.isfile(graph.file_index_path(self.root)))
+        calls = self._spy_extract()
+        g = graph.build(self.root, incremental=True)
+        self.assertEqual(calls, [], f"unchanged files were re-extracted: {calls}")
+        self.assertGreater(len(g.nodes), 0)
+
+    def test_only_changed_file_reextracted_and_graph_matches_full(self):
+        graph.build_and_save(self.root)  # snapshot current fingerprints
+        # change ONE file; append so size differs (mtime-independent detection)
+        Path(self.root, "b.py").write_text(
+            "from a import load\n\ndef run():\n    return load('x')\n\n"
+            "def extra():\n    return util()\n")
+        calls = self._spy_extract()
+        g_incr = graph.build(self.root, incremental=True)
+        self.assertEqual(sorted(calls), ["b.py"],
+                         f"incremental touched more than the changed file: {calls}")
+        # identical to a from-scratch full build of the modified tree
+        g_full = graph.build(self.root)
+        self.assertEqual(g_incr.nodes, g_full.nodes)
+        self.assertEqual(self._edge_set(g_incr), self._edge_set(g_full))
+        # the new cross-file edge is present
+        self.assertIn(("b.py::extra", "c.py::util", "calls"),
+                      self._edge_set(g_incr))
+
+    def test_deleted_file_falls_out(self):
+        graph.build_and_save(self.root)
+        os.remove(os.path.join(self.root, "c.py"))
+        g = graph.build(self.root, incremental=True)
+        self.assertNotIn("c.py::util", g.nodes)
+        files = {n["file"] for n in g.nodes.values()}
+        self.assertNotIn("c.py", files)
+
+    def test_poisoned_file_index_is_ignored_not_trusted(self):
+        # the fingerprint cache is untrusted input: an out-of-tree symbol path or
+        # a control-char splice must drop the whole cache and force re-extraction,
+        # never surface as a pointer.
+        graph.build_and_save(self.root)
+        fpath = graph.file_index_path(self.root)
+        good = json.loads(Path(fpath).read_text())
+        for poison in (
+            {"a.py": {"size": 1, "mtime_ns": 1, "sha256": "x",
+                      "symbols": [{"name": "evil", "kind": "function",
+                                   "file": "/etc/passwd", "line": 1, "refs": []}]}},
+            {"a.py": {"size": 1, "mtime_ns": 1, "sha256": "x",
+                      "symbols": [{"name": "evil\n/etc/passwd:1", "kind": "function",
+                                   "file": "a.py", "line": 1, "refs": []}]}},
+            {"../evil.py": {"size": 1, "mtime_ns": 1, "sha256": "x", "symbols": []}},
+        ):
+            data = {"version": 1, "files": poison}
+            Path(fpath).write_text(json.dumps(data))
+            self.assertEqual(graph.load_file_index(self.root), {},
+                             "poisoned fingerprint cache was trusted")
+        # a valid cache still loads
+        Path(fpath).write_text(json.dumps(good))
+        self.assertGreater(len(graph.load_file_index(self.root)), 0)
+
+    def test_corrupt_file_index_degrades_to_full_extraction(self):
+        graph.build_and_save(self.root)
+        fpath = graph.file_index_path(self.root)
+        for corrupt in (b"\xff not json", b"{ broken",
+                        json.dumps({"files": "notadict"}).encode(),
+                        (b"[" * 100000 + b"]" * 100000)):  # RecursionError
+            Path(fpath).write_bytes(corrupt)
+            self.assertEqual(graph.load_file_index(self.root), {})  # no crash
+            # a full incremental build still succeeds despite the bad cache
+            g = graph.build(self.root, incremental=True)
+            self.assertIn("load", {n["name"] for n in g.nodes.values()})
+
+    def test_load_or_build_rebuild_is_incremental(self):
+        # when the graph cache is missing, load_or_build rebuilds reusing the
+        # fingerprint cache — only genuinely changed files are re-extracted.
+        graph.build_and_save(self.root)
+        os.remove(graph.cache_path(self.root))  # graph gone, fingerprints remain
+        calls = self._spy_extract()
+        g = graph.load_or_build(self.root)
+        self.assertEqual(calls, [], "load_or_build rebuild ignored the cache")
+        self.assertGreater(len(g.nodes), 0)
+
+
+class NewAlgorithmToolsTest(unittest.TestCase):
+    """The three new graph-algorithm MCP tools dispatch and validate params."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="eap-algo-mcp-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        Path(self.root, "a.py").write_text(
+            "def load(p):\n    return read(p)\n\ndef read(p):\n    return p\n")
+        Path(self.root, "b.py").write_text(
+            "from a import load\n\ndef run():\n    return load('x')\n")
+        self.engine = mcp.Engine(self.root)
+
+    def _call(self, name, args):
+        return mcp.handle_request(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": name, "arguments": args}}, self.engine)
+
+    def _payload(self, name, args):
+        return json.loads(self._call(name, args)["result"]["content"][0]["text"])
+
+    def test_path_tool(self):
+        res = self._payload("eap_graph_path", {"source": "run", "target": "read"})
+        self.assertTrue(res["found"])
+        self.assertEqual([p["name"] for p in res["path"]], ["run", "load", "read"])
+
+    def test_communities_tool(self):
+        res = self._payload("eap_graph_communities", {})
+        self.assertGreaterEqual(res["count"], 1)
+        self.assertIn("communities", res)
+
+    def test_central_tool(self):
+        res = self._payload("eap_graph_central", {"top": 3})
+        self.assertIn(res["method"], ("betweenness", "degree"))
+        self.assertLessEqual(len(res["central"]), 3)
+
+    def test_new_tools_validate_params(self):
+        # missing required path endpoint -> -32602
+        self.assertEqual(
+            self._call("eap_graph_path", {"source": "run"}).get("error", {}).get("code"),
+            -32602)
+        # unknown centrality method -> -32602
+        self.assertEqual(
+            self._call("eap_graph_central", {"method": "pagerank"})
+            .get("error", {}).get("code"), -32602)
+        # non-int min_size for communities -> -32602
+        self.assertEqual(
+            self._call("eap_graph_communities", {"min_size": float("inf")})
+            .get("error", {}).get("code"), -32602)
+
+    def test_build_incremental_param(self):
+        res = self._payload("eap_graph_build", {"incremental": True})
+        self.assertTrue(res["incremental"])
+        self.assertGreater(res["nodes"], 0)
 
 
 if __name__ == "__main__":

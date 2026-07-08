@@ -494,3 +494,118 @@ test('--only with only commas/whitespace yields zero ids and exits 2', () => {
   assert.equal(r.status, 2);
   assert.match(r.stderr, /at least one agent id|requires/i);
 });
+
+// ── EAP-Lean always-on block (peer of EAP-Signal) ────────────────────────────
+// EAP-Lean is the minimal-code-craft rule. It installs as a SECOND managed
+// fenced block (<!-- eap-lean:begin --> … <!-- eap-lean:end -->) into the SAME
+// rules file EAP-Signal writes, for every native agent, on by default with
+// Signal and opt-out via --no-lean. Every run is fully env-sandboxed (throwaway
+// HOME/XDG/HERMES + PATH neutralized) so the real machine's ~/.codex etc. are
+// NEVER touched. codex stands in for the native-agent path (nativePath()).
+const LEAN_BEGIN = '<!-- eap-lean:begin -->';
+const LEAN_END = '<!-- eap-lean:end -->';
+const SIGNAL_BEGIN = '<!-- eap-signal:begin -->';
+
+test('EAP-Lean: --only codex installs BOTH the eap-signal and eap-lean blocks into the native rules file', () => {
+  const home = mkTmp('lean-codex');
+  const env = sandboxEnv(home);
+  try {
+    const r = run(['--only', 'codex', '--non-interactive', '--no-color'], { env });
+    assert.equal(r.status, 0, r.stderr);
+    const file = nativePath('codex', env);
+    const txt = readFileSync(file, 'utf8');
+    // Both disciplines land in the one rules file.
+    assert.match(txt, /<!-- eap-signal:begin -->/, 'signal block present');
+    assert.match(txt, /<!-- eap-lean:begin -->/, 'lean block present');
+    assert.match(txt, /<!-- eap-lean:end -->/, 'lean end marker present');
+    assert.match(txt, /Prime directive/, 'real EAP-SIGNAL content');
+    assert.match(txt, /Decision ladder/, 'real EAP-LEAN content');    // the 7-rung ladder
+    assert.match(txt, /YAGNI/, 'ladder rung 1');
+    // Reported as installed, mentions Lean, never PLANNED.
+    assert.match(r.stdout, /Lean/);
+    assert.doesNotMatch(r.stdout, /PLANNED/);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('EAP-Lean: the eap-lean block is idempotent (exactly one block, file byte-identical on re-run)', () => {
+  const home = mkTmp('lean-idem');
+  const env = sandboxEnv(home);
+  try {
+    assert.equal(run(['--only', 'codex', '--non-interactive', '--no-color'], { env }).status, 0);
+    const file = nativePath('codex', env);
+    const first = readFileSync(file, 'utf8');
+    assert.equal(run(['--only', 'codex', '--non-interactive', '--no-color'], { env }).status, 0);
+    const second = readFileSync(file, 'utf8');
+    assert.equal(second, first, 'file byte-identical after re-install');
+    assert.equal(second.split(LEAN_BEGIN).length - 1, 1, 'exactly one eap-lean block');
+    assert.equal(second.split(SIGNAL_BEGIN).length - 1, 1, 'exactly one eap-signal block');
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('EAP-Lean: --uninstall strips the eap-lean block, preserving user content above/below', () => {
+  const home = mkTmp('lean-uninst');
+  const env = sandboxEnv(home);
+  try {
+    const file = nativePath('codex', env);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, '# ABOVE-USER-LINE\n');
+    assert.equal(run(['--only', 'codex', '--non-interactive', '--no-color'], { env }).status, 0);
+    writeFileSync(file, readFileSync(file, 'utf8') + '\n# BELOW-USER-LINE\n');
+    assert.match(readFileSync(file, 'utf8'), /eap-lean:begin/, 'setup: lean block installed');
+
+    const u = run(['--uninstall', '--non-interactive', '--no-color'], { env });
+    assert.equal(u.status, 0, u.stderr);
+    const after = readFileSync(file, 'utf8');
+    assert.doesNotMatch(after, /eap-lean:begin/, 'lean block stripped');
+    assert.doesNotMatch(after, /eap-lean:end/, 'lean end marker stripped');
+    assert.doesNotMatch(after, /eap-signal:begin/, 'signal block stripped too');
+    assert.match(after, /ABOVE-USER-LINE/, 'user content above preserved');
+    assert.match(after, /BELOW-USER-LINE/, 'user content below preserved');
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('EAP-Lean: --no-lean installs Signal but NOT the eap-lean block', () => {
+  const home = mkTmp('lean-off');
+  const env = sandboxEnv(home);
+  try {
+    const r = run(['--only', 'codex', '--no-lean', '--non-interactive', '--no-color'], { env });
+    assert.equal(r.status, 0, r.stderr);
+    const txt = readFileSync(nativePath('codex', env), 'utf8');
+    assert.match(txt, /eap-signal:begin/, 'signal still installed with --no-lean');
+    assert.doesNotMatch(txt, /eap-lean:begin/, '--no-lean must skip the lean block');
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('EAP-Lean: --dry-run --only codex plans BOTH the Signal and Lean blocks and writes nothing', () => {
+  const home = mkTmp('lean-dry');
+  const env = sandboxEnv(home);
+  try {
+    const r = run(['--dry-run', '--only', 'codex', '--non-interactive', '--no-color'], { env });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /eap-signal:begin/, 'dry-run plans the Signal block');
+    assert.match(r.stdout, /eap-lean:begin/, 'dry-run plans the Lean block');
+    assert.match(r.stdout, /would install/);
+    assert.ok(!existsSync(nativePath('codex', env)), 'dry-run must write nothing');
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('EAP-Lean: --only claude writes both blocks into CLAUDE.md and uninstall strips both, keeping user content', () => {
+  const dir = mkTmp('lean-claude');
+  try {
+    writeFileSync(join(dir, 'CLAUDE.md'), '# My rules\nKEEP-THIS-LINE\n');
+    const r = run(['--only', 'claude', '--config-dir', dir, '--no-runtime', '--no-context', '--non-interactive', '--no-color']);
+    assert.equal(r.status, 0, r.stderr);
+    const md = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
+    assert.match(md, /eap-signal:begin/, 'signal block in CLAUDE.md');
+    assert.match(md, /eap-lean:begin/, 'lean block in CLAUDE.md');
+    assert.match(md, /Decision ladder/, 'real EAP-LEAN content');
+    assert.match(md, /KEEP-THIS-LINE/, 'user content preserved');
+
+    const u = run(['--uninstall', '--config-dir', dir, '--non-interactive', '--no-color']);
+    assert.equal(u.status, 0, u.stderr);
+    const md2 = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
+    assert.doesNotMatch(md2, /eap-signal:begin/, 'signal block removed');
+    assert.doesNotMatch(md2, /eap-lean:begin/, 'lean block removed');
+    assert.match(md2, /KEEP-THIS-LINE/, 'user content survives uninstall');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

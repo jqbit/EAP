@@ -5,7 +5,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { executeScript, checkNetworkPolicy } from '../layers/eap-runtime/src/executor.mjs';
+import {
+  executeScript, executeFile, executeBatch, checkNetworkPolicy,
+  resolveInterpreter, runtimeAvailability, CANONICAL_LANGUAGES,
+} from '../layers/eap-runtime/src/executor.mjs';
 import { RuntimeStore } from '../layers/eap-runtime/src/store.mjs';
 
 test('runs a real python3 script; only printed stdout returns', async () => {
@@ -37,8 +40,8 @@ test('non-zero exit is reported, stdout still returned', async () => {
   assert.equal(r.output.trim(), 'partial');
 });
 
-test('unsupported language is refused with a clear message', async () => {
-  const r = await executeScript('puts 1', { language: 'ruby' });
+test('a genuinely unknown language is refused with a clear message', async () => {
+  const r = await executeScript('NOP', { language: 'malbolge' });
   assert.equal(r.ok, false);
   assert.equal(r.error, 'unsupported-language');
   assert.match(r.message, /python3/);
@@ -131,6 +134,156 @@ test('output cap truncates runaway stdout and flags it', async () => {
   });
   assert.equal(r.stdoutTruncated, true);
   assert.ok(Buffer.byteLength(r.output) <= 1000);
+});
+
+// ── polyglot: new languages (available ones run; missing ones fail cleanly) ──
+
+test('perl runs when available; only stdout returns', async (t) => {
+  if (!resolveInterpreter('perl').bin) { t.skip('perl not installed on this host'); return; }
+  const r = await executeScript('print 6 * 7, "\\n";', { language: 'perl' });
+  assert.equal(r.ok, true);
+  assert.equal(r.output.trim(), '42');
+});
+
+test('typescript runs when a TS runtime (tsx/deno/node) is available', async (t) => {
+  if (!resolveInterpreter('typescript').bin) { t.skip('no TS runtime (tsx/deno/node strip-types) on this host'); return; }
+  const r = await executeScript('const n: number = 20;\nconsole.log(n + 1);', { language: 'typescript' });
+  assert.equal(r.ok, true, `stderr: ${r.stderr}`);
+  assert.equal(r.output.trim(), '21');
+});
+
+test('each newly-supported language is either runnable or fails cleanly with runtime-not-available', async () => {
+  // Never a crash, never "unsupported-language" — these ARE supported; they may
+  // just lack a host runtime. Records which were skip-gracefully on this box.
+  const langs = ['ruby', 'go', 'rust', 'php', 'perl', 'r', 'elixir', 'typescript', 'csharp'];
+  for (const lang of langs) {
+    const r = await executeScript('print("noop")', { language: lang });
+    if (r.error === 'runtime-not-available') {
+      assert.equal(r.ok, false);
+      assert.match(r.message, /not installed/);
+    } else {
+      // A runtime exists: it ran (the trivial source may or may not be valid for
+      // that language, but it must not be a crash or an unsupported-language).
+      assert.notEqual(r.error, 'unsupported-language');
+      assert.equal(typeof r.ok, 'boolean');
+    }
+  }
+  // Canonical languages are all recognised (no unsupported-language for these).
+  for (const lang of CANONICAL_LANGUAGES) {
+    assert.notEqual(resolveInterpreter(lang).error, 'unsupported-language');
+  }
+});
+
+test('polyglot network deny-list refuses ruby/go/php idioms (pure policy, no runtime)', () => {
+  assert.equal(checkNetworkPolicy("require 'net/http'\nNet::HTTP.get(uri)").allowed, false);
+  assert.equal(checkNetworkPolicy('resp, _ := http.Get("http://x")').allowed, false);
+  assert.equal(checkNetworkPolicy('$x = file_get_contents("http://x");').allowed, false);
+  assert.equal(checkNetworkPolicy('$h = curl_init();').allowed, false);
+  assert.equal(checkNetworkPolicy('use LWP::UserAgent;').allowed, false);
+  // A benign polyglot script is still allowed.
+  assert.equal(checkNetworkPolicy('puts [1,2,3].map { |x| x * 2 }').allowed, true);
+});
+
+test('deny-list closes bash /dev/tcp, node core-module, R, and elixir egress', () => {
+  // bash built-in TCP/UDP pseudo-devices — full egress, no external binary.
+  assert.equal(checkNetworkPolicy('exec 3<>/dev/tcp/127.0.0.1/80').allowed, false);
+  assert.equal(checkNetworkPolicy('cat </dev/udp/host/53').allowed, false);
+  // node core network modules via require()/import()/static import + http.get.
+  assert.equal(checkNetworkPolicy("const s = require('net').connect(80,'x')").allowed, false);
+  assert.equal(checkNetworkPolicy("const h = require('https'); h.get('http://x')").allowed, false);
+  assert.equal(checkNetworkPolicy("import net from 'node:net'").allowed, false);
+  assert.equal(checkNetworkPolicy("await import('http')").allowed, false);
+  assert.equal(checkNetworkPolicy("http.request({host:'x'})").allowed, false);
+  // R
+  assert.equal(checkNetworkPolicy('download.file("http://x", "o")').allowed, false);
+  assert.equal(checkNetworkPolicy('readLines(url("https://x"))').allowed, false);
+  assert.equal(checkNetworkPolicy('library(httr); GET("http://x")').allowed, false);
+  // elixir / erlang
+  assert.equal(checkNetworkPolicy(':httpc.request(:get, {~c"http://x", []}, [], [])').allowed, false);
+  assert.equal(checkNetworkPolicy(':gen_tcp.connect(~c"x", 80, [])').allowed, false);
+  assert.equal(checkNetworkPolicy('HTTPoison.get("http://x")').allowed, false);
+  // Benign lookalikes stay allowed — no false positives on ordinary code.
+  assert.equal(checkNetworkPolicy('const url = "not a call"').allowed, true);
+  assert.equal(checkNetworkPolicy('def download_files(x): return x').allowed, true);
+  assert.equal(checkNetworkPolicy('cat /dev/null').allowed, true);
+});
+
+// ── intent-driven filtering ─────────────────────────────────────────────────
+
+test('offloaded output + intent returns matching chunks and a vocabulary, not a bare pointer', async (t) => {
+  if (!resolveInterpreter('python3').bin) { t.skip('python3 missing'); return; }
+  const store = new RuntimeStore(':memory:');
+  const script = [
+    'for i in range(400):',
+    '    print(f"routine event {i} status ok metric latency")',
+    'print("ALERT breach threshold exceeded on payments service")',
+  ].join('\n');
+  const r = await executeScript(script, {
+    language: 'python3', store, offloadThreshold: 1024, intent: 'breach threshold payments',
+  });
+  assert.equal(r.offloaded, true);
+  assert.ok(r.pointer);
+  assert.equal(r.intent, 'breach threshold payments');
+  assert.ok(Array.isArray(r.matches) && r.matches.length >= 1, 'intent matches expected');
+  assert.match(r.matches[0].body, /breach threshold exceeded/); // lossless chunk
+  assert.ok(Array.isArray(r.vocabulary) && r.vocabulary.length > 0, 'vocabulary expected');
+  assert.match(r.hint, /matching intent/);
+  store.close();
+});
+
+// ── eap_execute_file ─────────────────────────────────────────────────────────
+
+test('executeFile runs a script from disk, infers language from extension', async (t) => {
+  if (!resolveInterpreter('python3').bin) { t.skip('python3 missing'); return; }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'eap-file-'));
+  const f = path.join(dir, 'job.py');
+  fs.writeFileSync(f, 'print("from-file", 3 + 4)');
+  const r = await executeFile(f);
+  assert.equal(r.ok, true);
+  assert.match(r.output, /from-file 7/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('executeFile refuses a missing file and a network-policy-violating file', async () => {
+  const miss = await executeFile('/no/such/file.py');
+  assert.equal(miss.ok, false);
+  assert.equal(miss.error, 'not-found');
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'eap-file-'));
+  const f = path.join(dir, 'bad.sh');
+  fs.writeFileSync(f, 'curl http://example.com');
+  const denied = await executeFile(f);
+  assert.equal(denied.ok, false);
+  assert.equal(denied.error, 'network-denied');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ── eap_batch_execute ────────────────────────────────────────────────────────
+
+test('executeBatch runs several scripts sequentially and bounds the count', async (t) => {
+  if (!resolveInterpreter('python3').bin) { t.skip('python3 missing'); return; }
+  const batch = await executeBatch([
+    { script: 'print(1 + 1)', language: 'python3' },
+    { script: 'console.log("two")', language: 'node' },
+  ]);
+  assert.equal(batch.count, 2);
+  assert.equal(batch.results[0].output.trim(), '2');
+  assert.equal(batch.results[1].output.trim(), 'two');
+
+  const tooBig = await executeBatch(Array.from({ length: 21 }, () => ({ script: 'print(1)' })));
+  assert.equal(tooBig.ok, false);
+  assert.equal(tooBig.error, 'batch-too-large');
+
+  const empty = await executeBatch([]);
+  assert.equal(empty.error, 'empty-batch');
+});
+
+test('runtimeAvailability reports a boolean per canonical language', () => {
+  const rep = runtimeAvailability();
+  for (const lang of CANONICAL_LANGUAGES) {
+    assert.equal(typeof rep[lang].available, 'boolean');
+    assert.ok(Array.isArray(rep[lang].tried));
+  }
 });
 
 test('timeout reaps the whole process tree (no orphaned grandchild holds the pipe)', async (t) => {

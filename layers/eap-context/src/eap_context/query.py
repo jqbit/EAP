@@ -12,13 +12,21 @@ from __future__ import annotations
 
 import math
 import re
-from collections import deque
+from collections import defaultdict, deque
 
 from .graph import SymbolGraph
 
 DEFAULT_DEPTH = 3
 DEFAULT_LIMIT = 20
 MAX_SEEDS = 5
+
+# Fuzzy (typo-tolerant) seeding kicks in only as a FALLBACK: when exact / sub-
+# string / prefix scoring finds fewer than this many candidate seeds, a bounded
+# Levenshtein pass over trigram-pruned candidates recovers misspelled terms.
+FUZZY_MIN_SEEDS = MAX_SEEDS
+FUZZY_MIN_TOKEN = 4        # short tokens are too collision-prone to fuzzy-match
+FUZZY_MAX_DIST_SHORT = 1   # edit budget for tokens under 6 chars
+FUZZY_MAX_DIST_LONG = 2    # edit budget for tokens 6+ chars
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
@@ -63,12 +71,120 @@ def god_nodes(g: SymbolGraph, top: int = 10, threshold: int | None = None) -> li
 
 
 # ---------------------------------------------------------------------------
+# fuzzy (typo-tolerant) matching — stdlib trigram index + bounded Levenshtein
+# ---------------------------------------------------------------------------
+
+
+def _trigrams(s: str) -> set[str]:
+    """Character trigrams of *s* (a whole-string fallback for len < 3)."""
+    s = s.lower()
+    if len(s) < 3:
+        return {s} if s else set()
+    return {s[i:i + 3] for i in range(len(s) - 2)}
+
+
+def build_trigram_index(g: SymbolGraph) -> dict[str, list[str]]:
+    """Inverted index: trigram -> node ids whose short name contains it.
+
+    Used to prune fuzzy-match candidates on large graphs so bounded Levenshtein
+    only runs against names that already share a 3-gram with the query token,
+    instead of every node. Built lazily (only when the fuzzy fallback fires).
+    """
+    idx: dict[str, list[str]] = defaultdict(list)
+    for nid, n in g.nodes.items():
+        short = n["name"].rsplit(".", 1)[-1].lower()
+        for tg in _trigrams(short):
+            idx[tg].append(nid)
+    return idx
+
+
+def _bounded_levenshtein(a: str, b: str, max_dist: int) -> int:
+    """Levenshtein distance, capped: returns ``max_dist + 1`` once it is exceeded.
+
+    Classic DP with an early-exit when the whole working row is already over
+    budget, so cost is O(len(a) * len(b)) worst case but usually far less. Only
+    ever called on trigram-pruned candidate pairs, so total work stays bounded.
+    """
+    la, lb = len(a), len(b)
+    if abs(la - lb) > max_dist:
+        return max_dist + 1
+    if la > lb:  # keep the inner row short
+        a, b, la, lb = b, a, lb, la
+    prev = list(range(la + 1))
+    for j in range(1, lb + 1):
+        cur = [j] + [0] * la
+        bj = b[j - 1]
+        row_min = cur[0]
+        for i in range(1, la + 1):
+            cost = 0 if a[i - 1] == bj else 1
+            cur[i] = min(prev[i] + 1, cur[i - 1] + 1, prev[i - 1] + cost)
+            if cur[i] < row_min:
+                row_min = cur[i]
+        if row_min > max_dist:
+            return max_dist + 1
+        prev = cur
+    return prev[la]
+
+
+def _fuzzy_scores(
+    g: SymbolGraph,
+    q_tokens: list[str],
+    idf: dict[str, float],
+    node_tokens: dict[str, set[str]],
+    already: set[str],
+) -> list[tuple[float, str]]:
+    """Recover seeds for misspelled query tokens via bounded edit distance.
+
+    For each query token >= FUZZY_MIN_TOKEN chars, gather nodes sharing at least
+    one trigram, then keep those whose name has a token within the edit budget
+    (1 for short tokens, 2 for long). Awards reduced IDF credit (distance-1 more
+    than distance-2). Nodes already scored exactly are skipped.
+    """
+    tokens = [t for t in q_tokens if len(t) >= FUZZY_MIN_TOKEN]
+    if not tokens:
+        return []
+    tindex = build_trigram_index(g)
+    accum: dict[str, float] = {}
+    for t in tokens:
+        max_dist = FUZZY_MAX_DIST_SHORT if len(t) < 6 else FUZZY_MAX_DIST_LONG
+        candidates: set[str] = set()
+        for tg in _trigrams(t):
+            candidates.update(tindex.get(tg, ()))
+        for nid in candidates:
+            if nid in already:
+                continue
+            best = None
+            for tok in node_tokens[nid]:
+                if abs(len(tok) - len(t)) > max_dist:
+                    continue
+                d = _bounded_levenshtein(t, tok, max_dist)
+                if d <= max_dist and (best is None or d < best):
+                    best = d
+            if best is not None:
+                credit = (0.35 if best == 1 else 0.2) * idf.get(t, 1.0)
+                accum[nid] = accum.get(nid, 0.0) + credit
+    out: list[tuple[float, str]] = []
+    for nid, score in accum.items():
+        if g.nodes[nid]["kind"] in ("function", "method", "class"):
+            score *= 1.2
+        out.append((score, nid))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # seed scoring
 # ---------------------------------------------------------------------------
 
 
 def seed_scores(g: SymbolGraph, text: str) -> list[tuple[float, str]]:
-    """Score every node against the query: exact-token IDF + substring credit."""
+    """Score every node against the query: exact-token IDF + substring credit.
+
+    When exact/substring/prefix scoring yields fewer than FUZZY_MIN_SEEDS
+    candidates, a typo-tolerant fuzzy pass (trigram-pruned bounded Levenshtein)
+    is appended so a misspelled term still seeds the traversal. Fuzzy is only a
+    fallback: on any query that already matches enough symbols it never runs, so
+    exact-match ranking is unchanged.
+    """
     q_tokens = [t for t in dict.fromkeys(tokenize(text)) if t]
     if not q_tokens or not g.nodes:
         return []
@@ -101,6 +217,11 @@ def seed_scores(g: SymbolGraph, text: str) -> list[tuple[float, str]]:
             if g.nodes[nid]["kind"] in ("function", "method", "class"):
                 score *= 1.2
             scored.append((score, nid))
+
+    if len(scored) < FUZZY_MIN_SEEDS:
+        already = {nid for _, nid in scored}
+        scored += _fuzzy_scores(g, q_tokens, idf, node_tokens, already)
+
     scored.sort(key=lambda p: (-p[0], p[1]))
     return scored
 

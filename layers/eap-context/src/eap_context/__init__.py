@@ -10,6 +10,6 @@ implementation is Python standard library only.
 
 __version__ = "0.1.0"
 
-from . import extract, graph, query, mcp  # noqa: F401
+from . import algorithms, extract, graph, mcp, query  # noqa: F401
 
-__all__ = ["extract", "graph", "query", "mcp", "__version__"]
+__all__ = ["algorithms", "extract", "graph", "query", "mcp", "__version__"]

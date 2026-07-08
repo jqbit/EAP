@@ -41,6 +41,7 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 const RUNTIME_MCP = path.join(REPO_ROOT, 'layers', 'eap-runtime', 'src', 'mcp.mjs');
 const CONTEXT_MCP = path.join(REPO_ROOT, 'layers', 'eap-context', 'src', 'eap_context', 'mcp.py');
 const SIGNAL_RULE = path.join(REPO_ROOT, 'layers', 'eap-signal', 'EAP-SIGNAL.md');
+const LEAN_RULE = path.join(REPO_ROOT, 'layers', 'eap-lean', 'EAP-LEAN.md');
 const HOOK_DISPATCH = path.join(REPO_ROOT, 'src', 'hooks', 'eap-dispatch.mjs');
 
 // Managed-block markers (Signal rule) and the hook idempotency marker.
@@ -51,7 +52,14 @@ const SIGNAL_END = '<!-- eap-signal:end -->';
 const LEGACY_SIGNAL_BEGIN = '<!-- eap-voice:begin -->';
 const LEGACY_SIGNAL_END = '<!-- eap-voice:end -->';
 
-// Strip the current AND legacy managed blocks from a rules-file body.
+// Managed-block markers for the always-on EAP-Lean (minimal-code craft) rule. It
+// is a peer of Signal: a second fenced block in the SAME rules file, upserted and
+// stripped independently. No legacy markers exist — Lean shipped as eap-lean from
+// the start.
+const LEAN_BEGIN = '<!-- eap-lean:begin -->';
+const LEAN_END = '<!-- eap-lean:end -->';
+
+// Strip the current AND legacy Signal managed blocks from a rules-file body.
 function stripSignalBlocks(body) {
   let touched = false;
   let r = stripFencedBlock(body, SIGNAL_BEGIN, SIGNAL_END);
@@ -59,6 +67,17 @@ function stripSignalBlocks(body) {
   r = stripFencedBlock(r.text, LEGACY_SIGNAL_BEGIN, LEGACY_SIGNAL_END);
   touched = touched || r.stripped;
   return { text: r.text, stripped: touched };
+}
+
+// Strip EVERY EAP-managed block (Signal + legacy Signal, then Lean) from a
+// rules-file body — the uninstall counterpart of writeRulesBlocks. Returns
+// { text, stripped } with `stripped` true if either discipline's block was
+// present. Surrounding user content is preserved by stripFencedBlock.
+function stripEapBlocks(body) {
+  let r = stripSignalBlocks(body);
+  const signalStripped = r.stripped;
+  const lean = stripFencedBlock(r.text, LEAN_BEGIN, LEAN_END);
+  return { text: lean.text, stripped: signalStripped || lean.stripped };
 }
 const HOOK_MARKER = 'eap-dispatch';
 
@@ -136,7 +155,7 @@ function parseArgs(argv) {
   const opts = {
     help: false, listOnly: false, dryRun: false, uninstall: false,
     nonInteractive: false, noColor: false, force: false,
-    runtime: true, context: true, tui: false, yes: false,
+    runtime: true, context: true, lean: true, tui: false, yes: false,
     only: [], configDir: null,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -151,6 +170,7 @@ function parseArgs(argv) {
       case '--force': opts.force = true; break;
       case '--no-runtime': opts.runtime = false; break;
       case '--no-context': opts.context = false; break;
+      case '--no-lean': opts.lean = false; break;
       case '--tui': opts.tui = true; break;
       case '-y': case '--yes': opts.yes = true; break;
       case '--': break;
@@ -298,6 +318,33 @@ function buildSignalBody(warn) {
   catch (e) { if (typeof warn === 'function') warn(`  cannot read Signal rule (${SIGNAL_RULE}): ${e.message}`); return null; }
 }
 
+// Single source of truth for the always-on EAP-Lean block body: the heading +
+// the verbatim EAP-LEAN.md rule. Mirrors buildSignalBody. Returns null (and
+// warns) if the rule file cannot be read.
+function buildLeanBody(warn) {
+  try { return '# EAP-Lean — minimal-code craft\n\n' + fs.readFileSync(LEAN_RULE, 'utf8').trimEnd(); }
+  catch (e) { if (typeof warn === 'function') warn(`  cannot read Lean rule (${LEAN_RULE}): ${e.message}`); return null; }
+}
+
+// Upsert the EAP always-on managed blocks (Signal, and — unless --no-lean — Lean)
+// into a rules/memory file in ONE symlink-safe atomic write. Each discipline
+// lives behind its own fenced markers in the same file, so the two upsert
+// independently and idempotently. A null body for a discipline skips it. Returns
+// null on success or the error message on failure (via tryWrite), so a read-only
+// rules dir records a clean per-agent failure instead of aborting the whole run.
+function writeRulesBlocks(file, signalBody, leanBody) {
+  return tryWrite(() => {
+    let body = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+    if (signalBody != null) body = upsertFencedBlock(body, SIGNAL_BEGIN, SIGNAL_END, signalBody);
+    if (leanBody != null) body = upsertFencedBlock(body, LEAN_BEGIN, LEAN_END, leanBody);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    backupOnce(file);
+    // atomicWrite (temp + rename) is symlink-safe: it never writes through a
+    // planted rules-file symlink, unlike fs.writeFileSync.
+    atomicWrite(file, body, 0o644);
+  });
+}
+
 // Resolve an env-aware path sentinel to an absolute path. Honors
 // $XDG_CONFIG_HOME (env or ~/.config), $HERMES_HOME (env or ~/.hermes), and
 // $HOME/~. Shared by resolveNativeSignal (rules files) and installMcpNative (MCP
@@ -341,11 +388,13 @@ function installClaude(ctx) {
 
   say('→ Claude Code — installing all three EAP layers');
 
-  // 1. Signal rule.
+  // 1. Always-on rules: Signal + (unless --no-lean) Lean.
   const signalBody = buildSignalBody(warn);
+  const leanBody = opts.lean ? buildLeanBody(warn) : null;
 
   if (opts.dryRun) {
     note(`  [1/3] Signal: write managed ${SIGNAL_BEGIN} block into ${claudeMd}`);
+    if (opts.lean) note(`  [1/3] Lean: write managed ${LEAN_BEGIN} block into ${claudeMd}`);
     note(`  [2/3] MCP: register ${serverNames.join(' + ') || '(none — both disabled)'} via ${useCli ? '`claude mcp add`' : `${mcpPath} mcpServers`}`);
     for (const [name, s] of Object.entries(servers)) note(`         ${name}: ${s.command} ${s.args.join(' ')}`);
     note(`  [3/3] Hooks: wire ${HOOK_EVENTS.map((h) => h.event).join(', ')} into ${settingsPath}`);
@@ -355,21 +404,14 @@ function installClaude(ctx) {
     return;
   }
 
-  // 1. Signal rule → CLAUDE.md (managed marker-fenced block). The write is guarded
-  // so a read-only configDir records a clean failure and MCP/hooks are still
-  // attempted rather than aborting the whole multi-agent run with a stack trace.
-  if (signalBody != null) {
-    const err = tryWrite(() => {
-      const existing = fs.existsSync(claudeMd) ? fs.readFileSync(claudeMd, 'utf8') : null;
-      const next = upsertFencedBlock(existing, SIGNAL_BEGIN, SIGNAL_END, signalBody);
-      fs.mkdirSync(path.dirname(claudeMd), { recursive: true });
-      backupOnce(claudeMd);
-      // atomicWrite (temp + rename) is symlink-safe, unlike fs.writeFileSync which
-      // would follow a planted CLAUDE.md symlink and write through to its target.
-      atomicWrite(claudeMd, next, 0o644);
-    });
-    if (err) { warn(`  [1/3] Signal write failed (${claudeMd}): ${err}`); results.failed.push(['claude-signal', err]); }
-    else ok(`  [1/3] Signal rule written to ${claudeMd}`);
+  // 1. Signal + Lean always-on rules → CLAUDE.md (managed marker-fenced blocks,
+  // one symlink-safe atomic write). The write is guarded so a read-only configDir
+  // records a clean failure and MCP/hooks are still attempted rather than aborting
+  // the whole multi-agent run with a stack trace.
+  if (signalBody != null || leanBody != null) {
+    const err = writeRulesBlocks(claudeMd, signalBody, leanBody);
+    if (err) { warn(`  [1/3] rules write failed (${claudeMd}): ${err}`); results.failed.push(['claude-rules', err]); }
+    else ok(`  [1/3] Signal${leanBody != null ? ' + Lean' : ''} rule written to ${claudeMd}`);
   }
 
   // 2. MCP servers.
@@ -434,7 +476,7 @@ function installClaude(ctx) {
   }
 
   // Layer flags for the dispatcher (runtime/context enable state + repo root).
-  const flagsErr = tryWrite(() => writeSettings(eapConfPath, { root: REPO_ROOT, runtime: opts.runtime, context: opts.context, version: 1 }));
+  const flagsErr = tryWrite(() => writeSettings(eapConfPath, { root: REPO_ROOT, runtime: opts.runtime, context: opts.context, lean: opts.lean, version: 1 }));
   if (flagsErr) { warn(`  layer-flags write failed (${eapConfPath}): ${flagsErr}`); results.failed.push(['claude-flags', flagsErr]); }
 
   results.installed.push('claude');
@@ -471,37 +513,32 @@ function installSignalNative(ctx, prov) {
 
   // Per-repo only (cursor): no global rules file to write.
   if (target == null) {
-    say(`→ ${prov.label} — EAP-Signal is per-repo (no global rules file)`);
+    say(`→ ${prov.label} — EAP-Signal + EAP-Lean are per-repo (no global rules file)`);
     note('  cursor-agent only honors a per-project AGENTS.md; drop one carrying the');
-    note(`  ${SIGNAL_BEGIN} block at each repo root you use it in.`);
+    note(`  ${SIGNAL_BEGIN} block (and the ${LEAN_BEGIN} block) at each repo root you use it in.`);
     if (opts.dryRun) results.dryRun.push(prov.id);
     else results.installed.push(prov.id);
     return;
   }
 
   const signalBody = buildSignalBody(warn);
-  say(`→ ${prov.label} — installing EAP-Signal (native)`);
+  const leanBody = opts.lean ? buildLeanBody(warn) : null;
+  say(`→ ${prov.label} — installing EAP-Signal${leanBody != null ? ' + EAP-Lean' : ''} (native)`);
   if (signalBody == null) { results.failed.push([prov.id, 'Signal rule unreadable']); return; }
 
   if (opts.dryRun) {
     note(`  Signal: write managed ${SIGNAL_BEGIN} block into ${target}`);
+    if (leanBody != null) note(`  Lean: write managed ${LEAN_BEGIN} block into ${target}`);
     results.dryRun.push(prov.id);
     return;
   }
 
-  // Guarded write: a read-only rules dir (mkdtempSync EACCES / EROFS) records a
-  // clean per-agent failure instead of aborting the whole multi-agent run.
-  const err = tryWrite(() => {
-    const existing = fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : null;
-    const next = upsertFencedBlock(existing, SIGNAL_BEGIN, SIGNAL_END, signalBody);
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    backupOnce(target);
-    // atomicWrite (temp + rename) is symlink-safe — never write through a planted
-    // rules-file symlink, matching installClaude.
-    atomicWrite(target, next, 0o644);
-  });
-  if (err) { warn(`  Signal write failed for ${prov.label} (${target}): ${err}`); results.failed.push([prov.id, err]); return; }
-  ok(`  Signal rule written to ${target}`);
+  // Guarded, single symlink-safe atomic write of both managed blocks. A read-only
+  // rules dir (mkdtempSync EACCES / EROFS) records a clean per-agent failure
+  // instead of aborting the whole multi-agent run.
+  const err = writeRulesBlocks(target, signalBody, leanBody);
+  if (err) { warn(`  rules write failed for ${prov.label} (${target}): ${err}`); results.failed.push([prov.id, err]); return; }
+  ok(`  Signal${leanBody != null ? ' + Lean' : ''} rule written to ${target}`);
   results.installed.push(prov.id);
 }
 
@@ -653,6 +690,7 @@ function planProvider(ctx, prov) {
   note(`→ ${prov.label} detected — EAP wiring PLANNED (not yet end-to-end).`);
   note('  Today EAP is wired end-to-end for Claude Code only. For this agent you can:');
   note(`    • Signal: paste ${SIGNAL_RULE} into its always-on rules/memory file.`);
+  note(`    • Lean:   paste ${LEAN_RULE} into the same file (minimal-code craft).`);
   note(`    • MCP:   add eap-runtime (node ${RUNTIME_MCP}) and eap-context`);
   note(`             (python3 ${CONTEXT_MCP} <project-root>) to its MCP config.`);
   ctx.results.planned.push(prov.id);
@@ -670,14 +708,14 @@ function uninstall(ctx) {
   const eapConfPath = path.join(configDir, '.eap.json');
   const useCli = !ctx.configDirExplicit && hasCmd('claude');
 
-  // 1. Signal block.
+  // 1. Signal + Lean always-on blocks.
   if (fs.existsSync(claudeMd)) {
-    const { text, stripped } = stripSignalBlocks(fs.readFileSync(claudeMd, 'utf8'));
+    const { text, stripped } = stripEapBlocks(fs.readFileSync(claudeMd, 'utf8'));
     if (stripped && !opts.dryRun) {
       if (text === '') { try { fs.unlinkSync(claudeMd); } catch { /* best effort */ } }
       else atomicWrite(claudeMd, text, 0o644);  // symlink-safe, matches install
     }
-    if (stripped) ok(text === '' ? `  removed ${claudeMd}` : `  stripped Signal block from ${claudeMd}`);
+    if (stripped) ok(text === '' ? `  removed ${claudeMd}` : `  stripped EAP blocks from ${claudeMd}`);
   }
 
   // 2. MCP servers. Remove at --scope user to match the install scope.
@@ -717,21 +755,21 @@ function uninstall(ctx) {
   // Layer-flags file.
   if (fs.existsSync(eapConfPath) && !opts.dryRun) { try { fs.unlinkSync(eapConfPath); } catch { /* best effort */ } }
 
-  // Native EAP-Signal blocks (codex/opencode/pi/grok/antigravity/hermes). Strip
-  // exactly our fenced block from each agent's global rules file, preserving all
-  // surrounding user content; delete the file only when nothing else remains.
-  // cursor (native.signal === null) is per-repo — no global file to touch.
+  // Native EAP-Signal + EAP-Lean blocks (codex/opencode/pi/grok/antigravity/
+  // hermes). Strip exactly our fenced blocks from each agent's global rules file,
+  // preserving all surrounding user content; delete the file only when nothing
+  // else remains. cursor (native.signal === null) is per-repo — no global file.
   for (const prov of PROVIDERS) {
     if (!prov.native) continue;
     const target = resolveNativeSignal(prov);
     if (target == null || !fs.existsSync(target)) continue;
-    const { text, stripped } = stripSignalBlocks(fs.readFileSync(target, 'utf8'));
+    const { text, stripped } = stripEapBlocks(fs.readFileSync(target, 'utf8'));
     if (!stripped) continue;
     if (!opts.dryRun) {
       if (text === '') { try { fs.unlinkSync(target); } catch { /* best effort */ } }
       else atomicWrite(target, text, 0o644); // symlink-safe, matches install
     }
-    ok(text === '' ? `  removed ${target}` : `  stripped Signal block from ${prov.label} (${target})`);
+    ok(text === '' ? `  removed ${target}` : `  stripped EAP blocks from ${prov.label} (${target})`);
   }
 
   // Native MCP registrations (codex/grok/hermes CLI + cursor/antigravity/opencode
@@ -758,18 +796,19 @@ function printList(noColor) {
   process.stdout.write(`  ${pad('--', 13)} ${pad('-----', 22)} ------\n`);
   for (const p of PROVIDERS) {
     let status;
-    if (p.wired) status = c.green('end-to-end (all 3)');
-    else if (p.native && p.native.mcp) status = c.green(p.native.signal === null ? 'signal(per-repo) + mcp' : 'signal + mcp');
-    else if (p.native) status = c.green('signal');
+    if (p.wired) status = c.green('end-to-end (all 3 + lean)');
+    else if (p.native && p.native.mcp) status = c.green(p.native.signal === null ? 'signal+lean(per-repo) + mcp' : 'signal + lean + mcp');
+    else if (p.native) status = c.green('signal + lean');
     else status = c.dim('planned');
     const soft = p.soft ? c.dim(' (soft-detect)') : '';
     process.stdout.write(`  ${pad(p.id, 13)} ${pad(p.label, 22)} ${status}${soft}\n`);
   }
   process.stdout.write('\n');
-  process.stdout.write(c.dim(`  ${wired} provider wired end-to-end (Claude Code, all 3 layers); ${signalMcp} with native EAP-Signal + both MCP servers; ${signalOnly} EAP-Signal only (no MCP); ${planned} detected + planned.\n`));
-  process.stdout.write(c.dim('  "signal + mcp" = the always-on EAP-Signal rule AND both EAP MCP servers are registered natively; cursor is signal(per-repo).\n'));
+  process.stdout.write(c.dim(`  ${wired} provider wired end-to-end (Claude Code, all 3 layers + Lean); ${signalMcp} with native EAP-Signal + EAP-Lean + both MCP servers; ${signalOnly} EAP-Signal + EAP-Lean only (no MCP); ${planned} detected + planned.\n`));
+  process.stdout.write(c.dim('  "signal + lean" = the two always-on prompt rules (verdict-first output + minimal-code craft); "+ mcp" adds both EAP MCP servers; cursor is per-repo.\n'));
+  process.stdout.write(c.dim('  EAP-Lean installs beside EAP-Signal in the same rules file everywhere Signal lands; pass --no-lean to opt out of it.\n'));
   process.stdout.write(c.dim('  Planned providers are detected and given a manual plan — never silently claimed as wired.\n'));
-  process.stdout.write(c.dim('  Layers: Signal (always-on rule) + eap-runtime MCP + eap-context MCP + hook dispatcher.\n'));
+  process.stdout.write(c.dim('  Layers: Signal + Lean (always-on rules) + eap-runtime MCP + eap-context MCP + hook dispatcher.\n'));
 }
 
 // ── help ────────────────────────────────────────────────────────────────────
@@ -792,7 +831,8 @@ FLAGS
                          Default: \$CLAUDE_CONFIG_DIR or ~/.claude.
   --no-runtime           Skip the eap-runtime (working-memory offload) MCP server.
   --no-context           Skip the eap-context (code-symbol-graph) MCP server.
-  --uninstall, -u        Remove the EAP Signal block, MCP entries, and hooks.
+  --no-lean              Skip the always-on EAP-Lean (minimal-code craft) rule.
+  --uninstall, -u        Remove the EAP Signal + Lean blocks, MCP entries, and hooks.
   --non-interactive      Never prompt; use defaults (skips the TUI).
   --no-color             Disable ANSI colors.
   --force                Reserved (installs are idempotent; re-runs are safe).
@@ -800,12 +840,13 @@ FLAGS
 
 WHAT GETS INSTALLED (Claude Code, end-to-end)
   1. EAP-Signal   -> managed block in <configDir>/CLAUDE.md
+     EAP-Lean     -> second always-on managed block in the same CLAUDE.md (--no-lean opts out)
   2. eap-runtime -> node   ${RUNTIME_MCP}
      eap-context -> python3 ${CONTEXT_MCP} <project-root>
   3. hooks       -> SessionStart / PreToolUse / PostToolUse / PreCompact in
                     <configDir>/settings.json, running src/hooks/eap-dispatch.mjs
 
-NATIVE AGENTS (EAP-Signal rule + both EAP MCP servers, registered natively)
+NATIVE AGENTS (EAP-Signal + EAP-Lean rules + both EAP MCP servers, registered natively)
   codex, grok        -> Signal rule + '<bin> mcp add … -- <cmd> <args>'
   hermes             -> Signal rule + 'hermes mcp add … --command <cmd> --args <args>'
   opencode           -> Signal rule + 'mcp' key in opencode.jsonc (type:local)
@@ -857,7 +898,7 @@ async function runTui(opts, c) {
         opts.runtime = !/^n/i.test(await ask(c.cyan('  Enable EAP-Runtime MCP? ') + c.dim('[Y/n] '), 'y'));
         opts.context = !/^n/i.test(await ask(c.cyan('  Enable EAP-Context MCP? ') + c.dim('[Y/n] '), 'y'));
       }
-      const layers0 = 'Signal' + (opts.runtime ? ' + Runtime' : '') + (opts.context ? ' + Context' : '');
+      const layers0 = 'Signal' + (opts.lean ? ' + Lean' : '') + (opts.runtime ? ' + Runtime' : '') + (opts.context ? ' + Context' : '');
       process.stdout.write('\n' + c.cyan('  Plan: ') + `${chosen.map((p) => p.label).join(', ')}  ·  layers: ${layers0}\n`);
       if (!opts.yes) {
         if (/^n/i.test(await ask(c.cyan('  Proceed? ') + c.dim('[Y/n] '), 'y'))) { process.stdout.write(c.dim('  Cancelled.\n')); return false; }
@@ -905,7 +946,7 @@ async function runTui(opts, c) {
 
     // 3. Confirm.
     opts.only = roster.map((p) => p.id);
-    const layers = 'Signal' + (opts.runtime ? ' + Runtime' : '') + (opts.context ? ' + Context' : '');
+    const layers = 'Signal' + (opts.lean ? ' + Lean' : '') + (opts.runtime ? ' + Runtime' : '') + (opts.context ? ' + Context' : '');
     process.stdout.write('\n' + c.cyan('  Plan: ') + `${roster.map((p) => p.label).join(', ')}  ·  layers: ${layers}\n`);
     if (!opts.yes) {
       const go = await ask(c.cyan('  Proceed? ') + c.dim('[Y/n] '), 'y');
@@ -972,7 +1013,7 @@ function runInstall(opts) {
 
   ctx.say('EAP installer');
   ctx.note(`  repo: ${REPO_ROOT}`);
-  ctx.note(`  layers: Signal${opts.runtime ? ' + Runtime' : ''}${opts.context ? ' + Context' : ''}`);
+  ctx.note(`  layers: Signal${opts.lean ? ' + Lean' : ''}${opts.runtime ? ' + Runtime' : ''}${opts.context ? ' + Context' : ''}`);
   if (opts.dryRun) ctx.note('  (dry run — nothing will be written)');
   process.stdout.write('\n');
 

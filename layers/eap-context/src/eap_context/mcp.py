@@ -1,11 +1,14 @@
 """Minimal MCP server: JSON-RPC 2.0 over stdio (newline-delimited), stdlib only.
 
 Tools exposed:
-  eap_graph_build      — (re)index a directory into the .eap/graph.json cache
-  eap_graph_query      — subgraph + file:line pointers for a text query
-  eap_graph_neighbors  — edges around one symbol
-  eap_graph_stats      — graph size/shape summary
-  eap_graph_godnodes   — most-connected symbols
+  eap_graph_build       — (re)index a directory into the .eap/graph.json cache
+  eap_graph_query       — subgraph + file:line pointers for a text query
+  eap_graph_neighbors   — edges around one symbol
+  eap_graph_stats       — graph size/shape summary
+  eap_graph_godnodes    — most-connected symbols
+  eap_graph_path        — shortest path between two symbols (pointers)
+  eap_graph_communities — label-propagation community detection
+  eap_graph_central     — betweenness/degree centrality ranking
 
 Dispatch is a pure function (`handle_request`) so it is testable without the
 stdio loop. Both MCP-style routing (initialize / tools/list / tools/call) and
@@ -29,6 +32,7 @@ if __package__ in (None, ""):  # pragma: no cover — exercised via subprocess t
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     __package__ = "eap_context"
 
+from . import algorithms as alg_mod
 from . import graph as graph_mod
 from . import query as query_mod
 from .query import DEFAULT_DEPTH, DEFAULT_LIMIT
@@ -104,10 +108,11 @@ class Engine:
             if target != base and not target.startswith(base + os.sep):
                 raise JsonRpcError(INVALID_PARAMS, "root must be within the server root")
             root = target
-        g, path = graph_mod.build_and_save(root)
+        incremental = bool(params.get("incremental", False))
+        g, path = graph_mod.build_and_save(root, incremental=incremental)
         self.root = root
         self._graph = g
-        return {"cache": path, **query_mod.stats(g)}
+        return {"cache": path, "incremental": incremental, **query_mod.stats(g)}
 
     def query(self, params: dict) -> dict:
         text = params.get("query") or params.get("text")
@@ -142,6 +147,30 @@ class Engine:
         top = _coerce_int(params.get("top", 10), "top")
         return {"god_nodes": query_mod.god_nodes(self.graph(), top=top)}
 
+    def path(self, params: dict) -> dict:
+        source = params.get("source") or params.get("from") or params.get("a")
+        target = params.get("target") or params.get("to") or params.get("b")
+        if not source or not isinstance(source, str):
+            raise JsonRpcError(INVALID_PARAMS, "missing required string param 'source'")
+        if not target or not isinstance(target, str):
+            raise JsonRpcError(INVALID_PARAMS, "missing required string param 'target'")
+        return alg_mod.shortest_path(self.graph(), source, target)
+
+    def communities(self, params: dict) -> dict:
+        min_size = _coerce_int(params.get("min_size", 1), "min_size")
+        top = params.get("top")
+        if top is not None:
+            top = _coerce_int(top, "top")
+        return alg_mod.communities(self.graph(), min_size=min_size, top=top)
+
+    def central(self, params: dict) -> dict:
+        top = _coerce_int(params.get("top", 10), "top")
+        method = params.get("method", "auto")
+        if method not in ("auto", "betweenness", "degree"):
+            raise JsonRpcError(INVALID_PARAMS,
+                               "method must be auto|betweenness|degree")
+        return alg_mod.centrality(self.graph(), top=top, method=method)
+
 
 _TOOL_IMPLS = {
     "eap_graph_build": Engine.build,
@@ -149,6 +178,9 @@ _TOOL_IMPLS = {
     "eap_graph_neighbors": Engine.neighbors,
     "eap_graph_stats": Engine.stats,
     "eap_graph_godnodes": Engine.godnodes,
+    "eap_graph_path": Engine.path,
+    "eap_graph_communities": Engine.communities,
+    "eap_graph_central": Engine.central,
 }
 
 
@@ -159,8 +191,13 @@ def _schema(props: dict, required: list[str]) -> dict:
 TOOLS = [
     {
         "name": "eap_graph_build",
-        "description": "Index a codebase into the EAP symbol graph cache (.eap/graph.json).",
-        "inputSchema": _schema({"root": {"type": "string"}}, []),
+        "description": ("Index a codebase into the EAP symbol graph cache "
+                        "(.eap/graph.json). Set incremental=true to re-extract "
+                        "only files changed since the last build."),
+        "inputSchema": _schema({
+            "root": {"type": "string"},
+            "incremental": {"type": "boolean", "default": False},
+        }, []),
     },
     {
         "name": "eap_graph_query",
@@ -190,6 +227,33 @@ TOOLS = [
         "description": "Most-connected (hub) symbols in the graph.",
         "inputSchema": _schema({"top": {"type": "integer", "default": 10}}, []),
     },
+    {
+        "name": "eap_graph_path",
+        "description": ("Shortest path between two symbols (by id or name) over "
+                        "the undirected graph; returns the node path as pointers."),
+        "inputSchema": _schema({
+            "source": {"type": "string"},
+            "target": {"type": "string"},
+        }, ["source", "target"]),
+    },
+    {
+        "name": "eap_graph_communities",
+        "description": ("Deterministic label-propagation community detection; "
+                        "returns clusters of related symbols as pointers."),
+        "inputSchema": _schema({
+            "min_size": {"type": "integer", "default": 1},
+            "top": {"type": "integer"},
+        }, []),
+    },
+    {
+        "name": "eap_graph_central",
+        "description": ("Rank symbols by centrality (Brandes betweenness on small "
+                        "graphs, degree fallback on large ones)."),
+        "inputSchema": _schema({
+            "top": {"type": "integer", "default": 10},
+            "method": {"type": "string", "enum": ["auto", "betweenness", "degree"]},
+        }, []),
+    },
 ]
 
 
@@ -215,7 +279,12 @@ def dispatch(method: str, params: dict, engine: Engine) -> dict:
         impl = _TOOL_IMPLS.get(name)
         if impl is None:
             raise JsonRpcError(INVALID_PARAMS, f"unknown tool: {name!r}")
-        result = impl(engine, params.get("arguments") or {})
+        arguments = params.get("arguments")
+        if arguments is None:
+            arguments = {}
+        elif not isinstance(arguments, dict):
+            raise JsonRpcError(INVALID_PARAMS, "arguments must be an object")
+        result = impl(engine, arguments)
         return {
             "content": [{"type": "text", "text": json.dumps(result, indent=1)}],
             "isError": False,

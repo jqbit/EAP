@@ -24,6 +24,8 @@ from . import extract
 GRAPH_VERSION = 1
 CACHE_DIR = ".eap"
 CACHE_FILE = "graph.json"
+FILE_INDEX_FILE = "index.json"  # per-file fingerprint + symbol cache (incremental)
+FILE_INDEX_VERSION = 1
 
 DEFAULT_IGNORE = frozenset({
     ".git", "node_modules", ".eap", "dist", "build", "__pycache__",
@@ -48,6 +50,10 @@ class SymbolGraph:
         self.inc: dict[str, list[int]] = {}
         self.meta: dict = {}
         self._edge_seen: set[tuple] = set()
+        # rel -> {size, mtime_ns, sha256, symbols}: the per-file fingerprint +
+        # extracted-symbol cache that powers incremental rebuilds. Populated by
+        # build(); persisted alongside graph.json by build_and_save().
+        self.file_index: dict[str, dict] = {}
 
     # -- construction -------------------------------------------------------
 
@@ -147,15 +153,42 @@ def iter_source_files(root: str, ignore=DEFAULT_IGNORE):
 # ---------------------------------------------------------------------------
 
 
-def build(root: str, ignore=DEFAULT_IGNORE) -> SymbolGraph:
-    """Index *root* into a SymbolGraph (two passes: extract, then resolve)."""
+def build(root: str, ignore=DEFAULT_IGNORE, incremental: bool = False) -> SymbolGraph:
+    """Index *root* into a SymbolGraph (two passes: extract, then resolve).
+
+    When *incremental* is true, a prior per-file fingerprint cache
+    (``.eap/index.json``) is consulted: a file whose (size, mtime_ns) is
+    unchanged reuses its cached symbols without re-reading or re-extracting;
+    only new/changed files are read. The resolve pass (pass 2) is always redone
+    in full over the union of symbols, so the result is byte-for-byte identical
+    to a non-incremental build of the same tree — incremental only skips
+    redundant extraction work, never changes the graph. Deleted files simply
+    fall out (they no longer appear in the walk).
+    """
     g = SymbolGraph()
+    old_index = load_file_index(root) if incremental else {}
     per_file: dict[str, list[tuple[str, dict]]] = {}  # rel -> [(node_id, sym)]
     files = 0
 
-    # pass 1 — extract symbols, create nodes
+    # pass 1 — extract symbols (reusing unchanged files), create nodes. The walk
+    # is sorted (iter_source_files) so node insertion order — and therefore the
+    # `@line` id disambiguation — is identical whether or not files were reused.
     for abspath, rel in iter_source_files(root, ignore):
-        symbols = extract.extract_file(abspath, rel)
+        try:
+            st = os.stat(abspath)
+            size, mtime_ns = st.st_size, st.st_mtime_ns
+        except OSError:
+            continue
+        prev = old_index.get(rel)
+        if prev and prev.get("size") == size and prev.get("mtime_ns") == mtime_ns:
+            symbols = prev["symbols"]  # unchanged: reuse cached extraction
+            sha = prev.get("sha256", "")
+        else:
+            symbols, sha, size = extract.extract_file_hashed(abspath, rel)
+        # Record a fingerprint for every walked source file (even 0-symbol ones)
+        # so the next incremental build can skip them without a read.
+        g.file_index[rel] = {"size": size, "mtime_ns": mtime_ns,
+                             "sha256": sha, "symbols": symbols}
         if not symbols:
             continue
         files += 1
@@ -208,6 +241,7 @@ def build(root: str, ignore=DEFAULT_IGNORE) -> SymbolGraph:
         "files": files,
         "nodes": len(g.nodes),
         "edges": len(g.edges),
+        "incremental": bool(incremental),
     }
     return g
 
@@ -219,6 +253,10 @@ def build(root: str, ignore=DEFAULT_IGNORE) -> SymbolGraph:
 
 def cache_path(root: str) -> str:
     return os.path.join(os.path.abspath(root), CACHE_DIR, CACHE_FILE)
+
+
+def file_index_path(root: str) -> str:
+    return os.path.join(os.path.abspath(root), CACHE_DIR, FILE_INDEX_FILE)
 
 
 def save(g: SymbolGraph, path: str) -> str:
@@ -355,13 +393,21 @@ def load(path: str) -> SymbolGraph:
     return g
 
 
-def build_and_save(root: str, ignore=DEFAULT_IGNORE) -> tuple[SymbolGraph, str]:
-    g = build(root, ignore)
-    return g, save(g, cache_path(root))
+def build_and_save(root: str, ignore=DEFAULT_IGNORE,
+                   incremental: bool = False) -> tuple[SymbolGraph, str]:
+    g = build(root, ignore, incremental=incremental)
+    path = save(g, cache_path(root))
+    save_file_index(g, file_index_path(root))  # persist fingerprints for next --update
+    return g, path
 
 
 def load_or_build(root: str, rebuild: bool = False) -> SymbolGraph:
-    """Cache-first load; falls back to a fresh build (and saves it)."""
+    """Cache-first load; falls back to an incremental rebuild (and saves it).
+
+    When the graph cache is missing or rejected, the rebuild reuses the per-file
+    fingerprint cache (``.eap/index.json``) so only changed files are
+    re-extracted; a missing/poisoned fingerprint cache degrades to a full build.
+    """
     path = cache_path(root)
     if not rebuild and os.path.isfile(path):
         try:
@@ -372,5 +418,95 @@ def load_or_build(root: str, rebuild: bool = False) -> SymbolGraph:
             # stale/corrupt/wrong-shaped/unsafe, or a RecursionError from a
             # deeply-nested JSON payload — is caught and rebuilt from source.
             pass
-    g, _ = build_and_save(root)
+    g, _ = build_and_save(root, incremental=True)
     return g
+
+
+# ---------------------------------------------------------------------------
+# per-file fingerprint cache (incremental indexing)
+# ---------------------------------------------------------------------------
+
+
+def save_file_index(g: SymbolGraph, path: str) -> str:
+    """Atomically write the per-file fingerprint + symbol cache."""
+    data = {"version": FILE_INDEX_VERSION, "files": g.file_index}
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=1)
+    os.replace(tmp, path)
+    return path
+
+
+def _validate_symbol(sym, rel: str) -> dict:
+    """Validate one cached symbol from the (untrusted) fingerprint cache.
+
+    Applies the same discipline as the graph-cache loader: strings carry no
+    control characters (a spliced newline could forge an output line once the
+    symbol reaches a node/pointer), ``line`` is a positive int, ``file`` matches
+    the entry's own relpath, and ``refs`` is a list of clean strings. Raises
+    CacheFormatError on any violation so the whole fingerprint cache is dropped
+    and extraction falls back to reading source.
+    """
+    if not isinstance(sym, dict):
+        raise CacheFormatError("cached symbol must be an object")
+    try:
+        name, kind, file, line = sym["name"], sym["kind"], sym["file"], sym["line"]
+        refs = sym["refs"]
+    except (KeyError, TypeError) as exc:
+        raise CacheFormatError(f"cached symbol missing field: {exc}") from exc
+    _check_str_field(name, "symbol name")
+    _check_str_field(kind, "symbol kind")
+    if not _is_safe_relpath(file) or file != rel:
+        raise CacheFormatError(f"cached symbol file not in-tree/consistent: {file!r}")
+    if not isinstance(line, int) or isinstance(line, bool) or line < 1:
+        raise CacheFormatError(f"cached symbol line must be a positive int: {line!r}")
+    if not isinstance(refs, list):
+        raise CacheFormatError("cached symbol refs must be a list")
+    for r in refs:
+        _check_str_field(r, "symbol ref")
+    return {"name": name, "kind": kind, "file": file, "line": line, "refs": refs}
+
+
+def load_file_index(root: str) -> dict:
+    """Load + validate the fingerprint cache, or return {} if absent/unusable.
+
+    The cache is untrusted input, so every failure mode — missing file,
+    non-UTF-8/JSON, wrong shape, unsafe relpath, bad fingerprint types, poisoned
+    symbol, or a RecursionError from a deeply nested payload — degrades to {} (a
+    full extraction), never a crash and never a trusted bad pointer.
+    """
+    path = file_index_path(root)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            return {}
+        files = data.get("files")
+        if not isinstance(files, dict):
+            return {}
+        out: dict[str, dict] = {}
+        for rel, entry in files.items():
+            if not isinstance(rel, str) or not _is_safe_relpath(rel):
+                return {}  # a poisoned key would be trusted as an in-tree path
+            if not isinstance(entry, dict):
+                return {}
+            size, mtime_ns = entry.get("size"), entry.get("mtime_ns")
+            sha = entry.get("sha256", "")
+            symbols = entry.get("symbols", [])
+            if (not isinstance(size, int) or isinstance(size, bool) or size < 0
+                    or not isinstance(mtime_ns, int) or isinstance(mtime_ns, bool)
+                    or not isinstance(sha, str) or _has_control_char(sha)
+                    or not isinstance(symbols, list)):
+                return {}
+            out[rel] = {
+                "size": size, "mtime_ns": mtime_ns, "sha256": sha,
+                "symbols": [_validate_symbol(s, rel) for s in symbols],
+            }
+        return out
+    except Exception:
+        # untrusted input: any failure (incl. RecursionError / CacheFormatError)
+        # means "no usable fingerprint cache" → re-extract everything.
+        return {}

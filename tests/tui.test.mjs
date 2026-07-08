@@ -28,7 +28,7 @@ test('--tui drives from stdin, shows the plan, and dry-run writes nothing', () =
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /Targets \(from --only\)/);
   assert.match(r.stdout, /Plan:.*Claude Code/);
-  assert.match(r.stdout, /Plan:.*Signal \+ Runtime \+ Context/);
+  assert.match(r.stdout, /Plan:.*Signal \+ Lean \+ Runtime \+ Context/);
   assert.equal(fs.readdirSync(cfg).length, before, 'dry-run TUI wrote files');
   fs.rmSync(cfg, { recursive: true, force: true });
 });
@@ -42,12 +42,13 @@ test('--tui with "n" at Proceed cancels cleanly and writes nothing', () => {
   fs.rmSync(cfg, { recursive: true, force: true });
 });
 
-test('--tui + --yes skips the confirm; declining layers yields Signal-only', () => {
+test('--tui + --yes skips the confirm; declining the MCP layers yields Signal + Lean (both always-on)', () => {
   const cfg = fs.mkdtempSync(path.join(os.tmpdir(), 'eap-tui-'));
-  // Runtime n, Context n; --yes means no Proceed prompt.
+  // Runtime n, Context n; --yes means no Proceed prompt. Signal + Lean are the
+  // always-on prompt rules and stay in the plan (only the MCP layers are declined).
   const r = runTui('n\nn\n', ['--yes', '--dry-run', '--config-dir', cfg]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /Plan:.*layers: Signal$/m);
+  assert.match(r.stdout, /Plan:.*layers: Signal \+ Lean$/m);
   assert.doesNotMatch(r.stdout, /Plan:.*Runtime/);
   fs.rmSync(cfg, { recursive: true, force: true });
 });
