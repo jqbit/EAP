@@ -29,6 +29,35 @@ this is built from) and `../../docs/legal/ATTRIBUTION.md`.
 - MCP JSON-RPC framing (`eap_*` tools).
 - Session-continuity snapshotting for `PreCompact` / SessionStart.
 
+## Routing deny mode (opt-in)
+
+Default hook behaviour is a **nudge** (additional context only). Creating the
+flag file `.eap/routing-enforce` in a project switches the `PreToolUse` hook
+(`src/hooks/eap-dispatch.mjs`) to hard-deny three raw paths and redirect to the
+`eap_*` equivalent. Deny reason strings (source of truth:
+`DENY_REASONS` in `src/hooks/eap-dispatch.mjs`):
+
+- **Bash invoking curl/wget** — "EAP routing-enforce: network CLIs (curl/wget)
+  are denied in this project. Use eap_fetch instead — it retrieves the URL
+  through the SSRF-hardened allowlist and returns reduced text or a searchable
+  pointer."
+- **WebFetch** — "EAP routing-enforce: WebFetch is denied in this project. Use
+  eap_fetch (inline text or pointer) or eap_fetch_and_index (searchable pointer
+  + vocabulary) instead."
+- **Read of an oversized file** (> the 100 KB offload threshold from
+  `DESIGN.md`) — "EAP routing-enforce: raw Read of `<path>` (`<bytes>` bytes)
+  exceeds the `<threshold>`-byte offload threshold. Use eap_execute (extract
+  just the facts in a subprocess) or eap_index + eap_search (lossless chunk
+  retrieval) instead."
+
+Delete the flag file to return to nudge-only behaviour.
+
+## Skills
+
+Chat-invokable wrappers over the MCP tools live in `skills/`:
+`eap-stats` (measured bytes only — never modeled %/$), `eap-search`,
+`eap-doctor`, `eap-purge`.
+
 ## Requirements
 
 Node ≥ 22 (for stable `node:sqlite`). No npm install needed for the core.

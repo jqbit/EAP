@@ -14,7 +14,7 @@ const EXPECTED_TOOLS = [
   'eap_execute', 'eap_execute_file', 'eap_batch_execute',
   'eap_index', 'eap_search', 'eap_fetch', 'eap_fetch_and_index',
   'eap_stats', 'eap_offload', 'eap_purge', 'eap_doctor',
-  'eap_session_snapshot', 'eap_session_restore',
+  'eap_upgrade', 'eap_session_snapshot', 'eap_session_restore',
 ];
 
 function harness() {

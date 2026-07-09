@@ -29,7 +29,7 @@ const TIERS = [
   ['decision', 'error', 'rule'],                                 // 0: conclusions, failures, rules
   ['edit', 'write', 'file_write', 'file_edit', 'task'],          // 1: state changes + tasks
   ['tool', 'exec', 'file_read', 'git', 'intent'],               // 2: actions, reads, retrieval
-  ['cwd', 'env', 'skill', 'subagent'],                          // 3: ambient context
+  ['cwd', 'env', 'skill', 'subagent', 'turn'],                  // 3: ambient context (turn = Stop-hook turn boundary)
 ];
 
 // A short runnable retrieval hint per tier, emitted once before that tier's

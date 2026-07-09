@@ -88,8 +88,9 @@ compounded into a single headline number**.
 
 ## Invariants
 
-- **Prompt-only.** The ruleset and the three tooling skills are Markdown. No
-  runtime, no network, no dependency. Zero supply-chain surface.
+- **Prompt-only.** The ruleset and the five tooling skills are Markdown. No
+  runtime, no network, no dependency. Zero supply-chain surface. (`bench/` is
+  an opt-in measurement harness for maintainers; nothing installs or runs it.)
 - **Deterministic.** The rule is fixed text; it adds no nondeterministic step.
 - **Never trades correctness or safety.** The carve-outs are hard overrides,
   and the review/audit skills are scoped to complexity only — correctness,

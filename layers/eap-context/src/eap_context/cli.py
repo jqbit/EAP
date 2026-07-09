@@ -21,8 +21,11 @@ if __package__ in (None, ""):  # pragma: no cover
 
 from . import algorithms as alg_mod
 from . import graph as graph_mod
+from . import hooks as hooks_mod
 from . import mcp as mcp_mod
+from . import prs as prs_mod
 from . import query as query_mod
+from . import reflect as reflect_mod
 from .query import DEFAULT_DEPTH, DEFAULT_LIMIT
 
 
@@ -42,7 +45,11 @@ def cmd_build(args) -> int:
 def cmd_query(args) -> int:
     g = _load(args.root)
     result = query_mod.query(g, args.text, depth=args.depth, limit=args.limit,
-                             degree_cap=args.degree_cap)
+                             degree_cap=args.degree_cap,
+                             tags=reflect_mod.load_tags(args.root))
+    reflect_mod.log_query(args.root, "query",
+                          {"query": args.text, "depth": args.depth,
+                           "limit": args.limit}, result)
     if args.json:
         print(json.dumps(result, indent=1))
         return 0
@@ -119,8 +126,74 @@ def cmd_central(args) -> int:
     return 0
 
 
+def _print_affected(result) -> int:
+    if "error" in result:
+        print(result["error"], file=sys.stderr)
+        return 1
+    print(f"{len(result['changed_files'])} changed file(s), "
+          f"{len(result['matched_files'])} in graph -> "
+          f"{result['total']} affected symbol(s) (depth={result['depth']})")
+    for group in result["affected"]:
+        print(f"  distance {group['distance']}:")
+        for s in group["symbols"]:
+            print(f"    {s['pointer']}  {s['name']} [{s['kind']}]")
+    return 0
+
+
+def cmd_affected(args) -> int:
+    result = alg_mod.affected(_load(args.root), files=args.files or None,
+                              ref=args.ref, root=args.root, depth=args.depth)
+    if args.json:
+        print(json.dumps(result, indent=1))
+        return 1 if "error" in result else 0
+    return _print_affected(result)
+
+
+def cmd_hook(args) -> int:
+    result = (hooks_mod.install if args.action == "install"
+              else hooks_mod.uninstall)(args.root)
+    if "error" in result:
+        print(result["error"], file=sys.stderr)
+        return 1
+    for verb in ("installed", "chained", "removed", "restored"):
+        if result.get(verb):
+            print(f"{verb}: {', '.join(result[verb])}")
+    print(f"hooks dir: {result['hooks_dir']}")
+    return 0
+
+
+def cmd_prs(args) -> int:
+    if args.number is None:
+        result = prs_mod.list_prs(args.root)
+        if args.json:
+            print(json.dumps(result, indent=1))
+            return 1 if "error" in result else 0
+        if "error" in result:
+            print(result["error"], file=sys.stderr)
+            return 1
+        for p in result["prs"]:
+            print(f"  #{p['number']}  {p['title']}  "
+                  f"[{p['branch']}] @{p['author']}")
+        print(f"{result['count']} open PR(s)")
+        return 0
+    result = prs_mod.pr_impact(_load(args.root), args.number,
+                               root=args.root, depth=args.depth)
+    if args.json:
+        print(json.dumps(result, indent=1))
+        return 1 if "error" in result else 0
+    if "error" in result:
+        print(result["error"], file=sys.stderr)
+        return 1
+    print(f"PR #{result['number']}  {result['title']}")
+    return _print_affected(result)
+
+
 def cmd_serve(args) -> int:
-    mcp_mod.serve(args.root)
+    if args.transport == "http":
+        mcp_mod.serve_http(args.root, host=args.host, port=args.port,
+                           api_key=args.api_key)
+    else:
+        mcp_mod.serve(args.root)
     return 0
 
 
@@ -182,8 +255,40 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_central)
 
-    p = sub.add_parser("serve", help="MCP JSON-RPC server on stdio")
+    p = sub.add_parser("affected",
+                       help="blast radius of changed files (reverse-dep closure)")
+    p.add_argument("files", nargs="*",
+                   help="changed files (graph-relative); omit to use --ref")
+    p.add_argument("--ref", default=None,
+                   help="git revision: changed files from `git diff --name-only REF`")
     p.add_argument("--root", default=".")
+    p.add_argument("--depth", type=int, default=alg_mod.AFFECTED_DEFAULT_DEPTH)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_affected)
+
+    p = sub.add_parser("hook",
+                       help="install/uninstall git post-commit/post-checkout "
+                            "hooks that run `build --update` quietly")
+    p.add_argument("action", choices=["install", "uninstall"])
+    p.add_argument("--root", default=".")
+    p.set_defaults(fn=cmd_hook)
+
+    p = sub.add_parser("prs", help="open PRs (gh CLI); with a number, its "
+                                   "changed files -> affected closure")
+    p.add_argument("number", nargs="?", type=int, default=None)
+    p.add_argument("--root", default=".")
+    p.add_argument("--depth", type=int, default=alg_mod.AFFECTED_DEFAULT_DEPTH)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_prs)
+
+    p = sub.add_parser("serve", help="MCP JSON-RPC server (stdio, or --transport http)")
+    p.add_argument("--root", default=".")
+    p.add_argument("--transport", choices=["stdio", "http"], default="stdio")
+    p.add_argument("--host", default="127.0.0.1",
+                   help="HTTP bind host (default localhost-only)")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--api-key", default=None, dest="api_key",
+                   help="HTTP API key (default: $EAP_CONTEXT_API_KEY or generated)")
     p.set_defaults(fn=cmd_serve)
 
     args = parser.parse_args(argv)

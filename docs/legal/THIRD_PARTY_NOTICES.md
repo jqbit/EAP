@@ -6,13 +6,18 @@ in [`ATTRIBUTION.md`](ATTRIBUTION.md)). The following upstream projects are
 MIT-licensed; where EAP includes substantial portions of their **documentation
 or code**, their copyright and permission notices are retained verbatim below.
 
-## ponytail — EAP-Lean rule text and skills
+## ponytail — EAP-Lean rule text, skills, examples, and benchmark harness
 
-EAP-Lean's rule file (`layers/eap-lean/EAP-LEAN.md`) and its three skills
-(`eap-lean-review`, `eap-lean-audit`, `eap-lean-debt`) are derivative of
-ponytail's documentation (its decision ladder, tag vocabulary, scoring strings,
-worked examples, and safety carve-outs). This is a documentation derivative, not
-concept-only; ponytail is MIT, and its notice is retained here.
+EAP-Lean's rule file (`layers/eap-lean/EAP-LEAN.md`), its five skills
+(`eap-lean-review`, `eap-lean-audit`, `eap-lean-debt`, `eap-lean-gain`,
+`eap-lean-help`), its worked-example corpus (`layers/eap-lean/examples/`,
+including verbatim upstream benchmark transcripts, clearly marked as such), and
+its benchmark harness code (`layers/eap-lean/bench/` — task configs,
+correctness/LOC gates, runner scripts adapted from ponytail's `benchmarks/`)
+are derivative of ponytail's documentation and benchmark code (its decision
+ladder, tag vocabulary, scoring strings, worked examples, and safety
+carve-outs). This is a documentation-and-code derivative, not concept-only;
+ponytail is MIT, and its notice is retained here.
 
 - Project: `ponytail` — Author: DietrichGebert — https://github.com/DietrichGebert/ponytail
 

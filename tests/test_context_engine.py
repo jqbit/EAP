@@ -265,7 +265,9 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual(names, {
             "eap_graph_query", "eap_graph_build", "eap_graph_neighbors",
             "eap_graph_stats", "eap_graph_godnodes", "eap_graph_path",
-            "eap_graph_communities", "eap_graph_central"})
+            "eap_graph_communities", "eap_graph_central",
+            "eap_graph_affected", "eap_graph_prs", "eap_graph_pr_impact",
+            "eap_graph_reflect"})
 
     # -- security regressions ------------------------------------------------
     # Each test below fails against the pre-hardening code and locks in a fix
@@ -674,7 +676,9 @@ class ContextEngineTest(unittest.TestCase):
         self.assertIn("eap_graph_path", tools)
         self.assertIn("eap_graph_communities", tools)
         self.assertIn("eap_graph_central", tools)
-        self.assertEqual(len(tools), 8)
+        self.assertIn("eap_graph_affected", tools)
+        self.assertIn("eap_graph_reflect", tools)
+        self.assertEqual(len(tools), 12)
 
 
 # ===========================================================================
@@ -1330,6 +1334,416 @@ class QueryCorrectnessAndPerfTest(unittest.TestCase):
         r2 = engine.query({"query": "beta"})
         self.assertIn("beta", {n["name"] for n in r2["nodes"]},
                       "engine served a stale graph after the cache changed")
+
+
+# ===========================================================================
+# Workstream C: .eapignore, affected, git hooks, PR tooling, HTTP, reflect.
+# ===========================================================================
+
+from eap_context import hooks, ignore, prs, reflect  # noqa: E402
+
+
+class EapignoreTest(unittest.TestCase):
+    """.eapignore (gitignore syntax) merged with .gitignore drives the walk."""
+
+    def test_eapignore_merged_with_gitignore(self):
+        root = tempfile.mkdtemp(prefix="eap-ignore-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        Path(root, "a.py").write_text("def alpha():\n    pass\n")
+        Path(root, "skip_one.py").write_text("def s_one():\n    pass\n")
+        Path(root, "skip_keep.py").write_text("def s_keep():\n    pass\n")
+        Path(root, "gen").mkdir()
+        Path(root, "gen", "g.py").write_text("def gee():\n    pass\n")
+        Path(root, "logs").mkdir()
+        Path(root, "logs", "l.py").write_text("def ell():\n    pass\n")
+        Path(root, ".gitignore").write_text("logs/\n")
+        Path(root, ".eapignore").write_text(
+            "# generated code\ngen/\nskip_*.py\n!skip_keep.py\n")
+        g = graph.build(root)
+        names = {n["name"] for n in g.nodes.values()}
+        self.assertIn("alpha", names)
+        self.assertIn("s_keep", names, "negation (!) did not re-include")
+        self.assertNotIn("s_one", names, ".eapignore glob not applied")
+        self.assertNotIn("gee", names, ".eapignore dir pattern not applied")
+        self.assertNotIn("ell", names, ".gitignore not merged")
+        # without ignore files, everything is indexed (rules are additive only)
+        os.remove(os.path.join(root, ".gitignore"))
+        os.remove(os.path.join(root, ".eapignore"))
+        names_all = {n["name"] for n in graph.build(root).nodes.values()}
+        for want in ("alpha", "s_one", "s_keep", "gee", "ell"):
+            self.assertIn(want, names_all)
+
+    def test_pattern_semantics(self):
+        r = ignore.IgnoreRules([c for c in map(ignore._compile, [
+            "*.log", "build/", "/top.py", "docs/**", "!docs/keep.md",
+        ]) if c])
+        self.assertTrue(r.ignored("x/y/err.log", False))     # bare glob, any depth
+        self.assertTrue(r.ignored("build", True))            # dir-only pattern
+        self.assertFalse(r.ignored("build", False))          # ...not a plain file
+        self.assertTrue(r.ignored("top.py", False))          # anchored
+        self.assertFalse(r.ignored("sub/top.py", False))     # anchored: not nested
+        self.assertTrue(r.ignored("docs/a/b.md", False))     # ** crosses dirs
+        self.assertFalse(r.ignored("docs/keep.md", False))   # last match wins (!)
+
+
+class AffectedTest(unittest.TestCase):
+    """affected(): bounded reverse-dependency closure grouped by distance."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="eap-affected-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        Path(self.root, "a.py").write_text("def base():\n    return 1\n")
+        Path(self.root, "b.py").write_text(
+            "from a import base\n\ndef mid():\n    return base()\n")
+        Path(self.root, "c.py").write_text(
+            "from b import mid\n\ndef top():\n    return mid()\n")
+        self.graph = graph.build(self.root)
+
+    @staticmethod
+    def _ids_at(result, distance):
+        for group in result["affected"]:
+            if group["distance"] == distance:
+                return {s["id"] for s in group["symbols"]}
+        return set()
+
+    def test_explicit_files_closure_by_distance(self):
+        res = algorithms.affected(self.graph, files=["a.py"], root=self.root,
+                                  depth=2)
+        self.assertEqual(res["matched_files"], ["a.py"])
+        self.assertIn("a.py::base", self._ids_at(res, 0))
+        self.assertIn("b.py::mid", self._ids_at(res, 1),
+                      "direct dependent missing from distance 1")
+        self.assertIn("c.py::top", self._ids_at(res, 2),
+                      "transitive dependent missing from distance 2")
+        # every pointer is file:line, never source text
+        for p in res["pointers"]:
+            self.assertRegex(p, r"^d=\d+  [\w./-]+:\d+  \S")
+        # depth bound holds: depth=1 must not reach c.py::top
+        shallow = algorithms.affected(self.graph, files=["a.py"],
+                                      root=self.root, depth=1)
+        self.assertNotIn("c.py::top",
+                         {s["id"] for grp in shallow["affected"]
+                          for s in grp["symbols"]})
+
+    def test_git_ref_and_validation(self):
+        # a hostile "ref" must never reach git argv as an option
+        self.assertIn("error",
+                      algorithms.affected(self.graph, ref="--upload-pack=/bin/sh",
+                                          root=self.root))
+        self.assertIn("error", algorithms.affected(self.graph, root=self.root))
+        # real git plumbing (skipped where git is unavailable)
+        if shutil.which("git") is None:
+            self.skipTest("git not installed")
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null",
+               "GIT_CONFIG_SYSTEM": "/dev/null"}
+        run = lambda *a: subprocess.run(  # noqa: E731
+            ["git", "-C", self.root, *a], capture_output=True, text=True, env=env)
+        run("init", "-q")
+        run("config", "user.email", "t@e.st")
+        run("config", "user.name", "t")
+        run("add", "-A")
+        run("commit", "-qm", "init")
+        Path(self.root, "a.py").write_text("def base():\n    return 2\n")
+        res = algorithms.affected(self.graph, ref="HEAD", root=self.root, depth=2)
+        self.assertEqual(res["changed_files"], ["a.py"])
+        self.assertIn("b.py::mid", self._ids_at(res, 1))
+
+    def test_mcp_affected_tool(self):
+        engine = mcp.Engine(self.root)
+
+        def call(args):
+            return mcp.handle_request(
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                 "params": {"name": "eap_graph_affected", "arguments": args}},
+                engine)
+
+        res = call({"files": ["a.py"], "depth": 2})
+        payload = json.loads(res["result"]["content"][0]["text"])
+        self.assertGreaterEqual(payload["total"], 3)
+        # neither files nor ref, and bad types -> -32602
+        self.assertEqual(call({}).get("error", {}).get("code"), -32602)
+        self.assertEqual(call({"files": "a.py"}).get("error", {}).get("code"),
+                         -32602)
+        self.assertEqual(call({"ref": 7}).get("error", {}).get("code"), -32602)
+
+
+class GitHookTest(unittest.TestCase):
+    """hook install/uninstall: quiet incremental rebuild, chained originals."""
+
+    def setUp(self):
+        if shutil.which("git") is None:
+            self.skipTest("git not installed")
+        self.root = tempfile.mkdtemp(prefix="eap-hook-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null",
+                    "GIT_CONFIG_SYSTEM": "/dev/null"}
+        self._git("init", "-q")
+        self._git("config", "user.email", "t@e.st")
+        self._git("config", "user.name", "t")
+
+    def _git(self, *args):
+        return subprocess.run(["git", "-C", self.root, *args],
+                              capture_output=True, text=True, env=self.env)
+
+    def test_install_chains_and_uninstall_restores(self):
+        legacy = "#!/bin/sh\necho legacy > legacy.out\n"
+        hooks_dir = os.path.join(self.root, ".git", "hooks")
+        os.makedirs(hooks_dir, exist_ok=True)
+        Path(hooks_dir, "post-commit").write_text(legacy)
+        os.chmod(os.path.join(hooks_dir, "post-commit"), 0o755)
+
+        res = hooks.install(self.root)
+        self.assertEqual(sorted(res["installed"]),
+                         ["post-checkout", "post-commit"])
+        self.assertEqual(res["chained"], ["post-commit"])
+        installed = Path(hooks_dir, "post-commit").read_text()
+        self.assertIn(hooks.MARKER, installed)
+        self.assertIn("--update", installed)
+        self.assertEqual(Path(hooks_dir, "post-commit.pre-eap").read_text(),
+                         legacy)
+        # reinstall is idempotent: our own hook is refreshed, not backed up
+        res2 = hooks.install(self.root)
+        self.assertEqual(res2["chained"], [])
+        self.assertEqual(Path(hooks_dir, "post-commit.pre-eap").read_text(),
+                         legacy)
+
+        # a real commit fires the hook: graph rebuilt AND the legacy hook ran
+        Path(self.root, "m.py").write_text("def committed():\n    pass\n")
+        self._git("add", "-A")
+        proc = self._git("commit", "-qm", "x")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(os.path.isfile(graph.cache_path(self.root)),
+                        "post-commit hook did not rebuild the graph")
+        g = graph.load(graph.cache_path(self.root))
+        self.assertIn("committed", {n["name"] for n in g.nodes.values()})
+        self.assertTrue(os.path.isfile(os.path.join(self.root, "legacy.out")),
+                        "pre-existing hook was not chained")
+
+        res3 = hooks.uninstall(self.root)
+        self.assertIn("post-commit", res3["removed"])
+        self.assertEqual(res3["restored"], ["post-commit"])
+        self.assertEqual(Path(hooks_dir, "post-commit").read_text(), legacy)
+        self.assertFalse(os.path.exists(
+            os.path.join(hooks_dir, "post-checkout")))
+
+    def test_not_a_repo_is_a_clean_error(self):
+        plain = tempfile.mkdtemp(prefix="eap-norepo-")
+        self.addCleanup(shutil.rmtree, plain, ignore_errors=True)
+        self.assertIn("error", hooks.install(plain))
+        self.assertIn("error", hooks.uninstall(plain))
+
+
+class PrToolingTest(unittest.TestCase):
+    """prs/pr_impact ride the gh CLI and degrade gracefully without it."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="eap-prs-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        Path(self.root, "a.py").write_text("def base():\n    return 1\n")
+        Path(self.root, "b.py").write_text(
+            "from a import base\n\ndef mid():\n    return base()\n")
+        self.graph = graph.build(self.root)
+
+    def _patch_gh(self, fn):
+        orig = prs._run_gh
+        prs._run_gh = fn
+        self.addCleanup(setattr, prs, "_run_gh", orig)
+
+    def test_missing_gh_is_a_graceful_error(self):
+        orig = prs.shutil.which
+        prs.shutil.which = lambda name: None
+        self.addCleanup(setattr, prs.shutil, "which", orig)
+        for res in (prs.list_prs(self.root),
+                    prs.pr_impact(self.graph, 1, root=self.root)):
+            self.assertIn("error", res)
+            self.assertIn("gh CLI not found", res["error"])
+            self.assertIn("cli.github.com", res["error"])
+        # via MCP: an error payload, never a crash / -32603
+        engine = mcp.Engine(self.root)
+        r = mcp.handle_request(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "eap_graph_prs", "arguments": {}}}, engine)
+        self.assertNotIn("error", r)  # JSON-RPC level ok
+        self.assertIn("gh CLI not found",
+                      json.loads(r["result"]["content"][0]["text"])["error"])
+
+    def test_pr_list_and_impact_with_canned_gh(self):
+        def fake_gh(args, root):
+            if args[:2] == ["pr", "list"]:
+                return [{"number": 7, "title": "t", "url": "u",
+                         "headRefName": "br", "updatedAt": "now",
+                         "author": {"login": "dev"}}], None
+            if args[:2] == ["pr", "view"]:
+                return {"number": 7, "title": "t", "url": "u",
+                        "files": [{"path": "a.py"}]}, None
+            return None, "unexpected gh call"
+
+        self._patch_gh(fake_gh)
+        listing = prs.list_prs(self.root)
+        self.assertEqual(listing["count"], 1)
+        self.assertEqual(listing["prs"][0]["author"], "dev")
+        impact = prs.pr_impact(self.graph, 7, root=self.root, depth=2)
+        self.assertEqual(impact["number"], 7)
+        ids = {s["id"] for grp in impact["affected"] for s in grp["symbols"]}
+        self.assertIn("a.py::base", ids)
+        self.assertIn("b.py::mid", ids)
+        # bad PR numbers are rejected before gh runs
+        self.assertIn("error", prs.pr_impact(self.graph, 0, root=self.root))
+        self.assertIn("error", prs.pr_impact(self.graph, True, root=self.root))
+        # MCP surface: missing number -> -32602
+        engine = mcp.Engine(self.root)
+        r = mcp.handle_request(
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "eap_graph_pr_impact", "arguments": {}}}, engine)
+        self.assertEqual(r["error"]["code"], -32602)
+
+
+class HttpTransportTest(unittest.TestCase):
+    """serve --transport http: keyed, POST-only, bounded, same dispatch."""
+
+    @classmethod
+    def setUpClass(cls):
+        import threading
+        cls.root = tempfile.mkdtemp(prefix="eap-http-")
+        Path(cls.root, "m.py").write_text("def handler():\n    return 1\n")
+        graph.build_and_save(cls.root)
+        cls.key = "test-key-123"
+        cls.server, key = mcp.make_http_server(cls.root, host="127.0.0.1",
+                                               port=0, api_key=cls.key)
+        assert key == cls.key
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever,
+                                      daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def _post(self, body: bytes, headers=None):
+        import urllib.error
+        import urllib.request
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/", data=body, method="POST",
+            headers={"Content-Type": "application/json", **(headers or {})})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read()
+
+    def test_key_required_and_query_served(self):
+        body = json.dumps({"jsonrpc": "2.0", "id": 1,
+                           "method": "eap_graph_query",
+                           "params": {"query": "handler"}}).encode()
+        # no key / wrong key -> 401, no result leaks
+        status, raw = self._post(body)
+        self.assertEqual(status, 401)
+        self.assertNotIn(b"pointers", raw)
+        status, _ = self._post(body, {"X-API-Key": "wrong"})
+        self.assertEqual(status, 401)
+        # right key -> 200 with pointers; Bearer form works too
+        for headers in ({"X-API-Key": self.key},
+                        {"Authorization": f"Bearer {self.key}"}):
+            status, raw = self._post(body, headers)
+            self.assertEqual(status, 200)
+            res = json.loads(raw)
+            self.assertTrue(res["result"]["pointers"])
+        # notification -> 204, no body
+        note = json.dumps({"jsonrpc": "2.0",
+                           "method": "notifications/initialized"}).encode()
+        status, raw = self._post(note, {"X-API-Key": self.key})
+        self.assertEqual(status, 204)
+        self.assertEqual(raw, b"")
+
+    def test_non_post_rejected(self):
+        import urllib.error
+        import urllib.request
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/",
+            headers={"X-API-Key": self.key})  # GET
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req, timeout=10)
+        self.assertEqual(ctx.exception.code, 405)
+
+    def test_oversized_body_rejected(self):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        self.addCleanup(conn.close)
+        conn.putrequest("POST", "/")
+        conn.putheader("X-API-Key", self.key)
+        conn.putheader("Content-Length", str(mcp.MAX_HTTP_BODY + 1))
+        conn.endheaders()
+        resp = conn.getresponse()
+        self.assertEqual(resp.status, 413)
+
+
+class ReflectAndQuerylogTest(unittest.TestCase):
+    """Query log JSONL + reflect tag overlay on seed scoring."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="eap-reflect-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        Path(self.root, "m.py").write_text(
+            "def alpha_handler():\n    return 1\n\n\n"
+            "def beta_handler():\n    return 2\n")
+        graph.build_and_save(self.root)
+
+    def test_querylog_appends_jsonl(self):
+        engine = mcp.Engine(self.root)
+        engine.query({"query": "handler"})
+        engine.query({"query": "alpha"})
+        log_path = reflect.querylog_path(self.root)
+        self.assertTrue(log_path.endswith(
+            os.path.join(".eap", "context", "querylog.jsonl")))
+        lines = Path(log_path).read_text().splitlines()
+        self.assertEqual(len(lines), 2)  # append-only, one record per query
+        rec = json.loads(lines[0])
+        self.assertEqual(rec["tool"], "eap_graph_query")
+        self.assertEqual(rec["args"]["query"], "handler")
+        self.assertTrue(rec["top"])
+        self.assertIn("ts", rec)
+        for p in rec["top"]:
+            self.assertNotIn("def ", p)  # pointers, never source text
+
+    def test_reflect_tags_bias_ranking(self):
+        engine = mcp.Engine(self.root)
+        # equal-scoring symbols: alpha wins the id tie-break by default
+        base = engine.query({"query": "handler"})
+        names = [n["name"] for n in base["nodes"] if n["kind"] == "function"]
+        self.assertEqual(names[0], "alpha_handler")
+        # tag beta preferred -> it outranks alpha
+        res = engine.reflect({"nodes": ["beta_handler"], "tag": "preferred"})
+        self.assertEqual(res["nodes"], ["m.py::beta_handler"])
+        self.assertTrue(os.path.isfile(reflect.reflect_path(self.root)))
+        boosted = engine.query({"query": "handler"})
+        names = [n["name"] for n in boosted["nodes"] if n["kind"] == "function"]
+        self.assertEqual(names[0], "beta_handler",
+                         "preferred tag did not boost ranking")
+        # contested pushes it back down
+        engine.reflect({"nodes": ["beta_handler"], "tag": "contested"})
+        names = [n["name"] for n in engine.query({"query": "handler"})["nodes"]
+                 if n["kind"] == "function"]
+        self.assertEqual(names[0], "alpha_handler")
+        # clear restores neutrality and unknown refs are reported, not fatal
+        cleared = engine.reflect({"nodes": ["beta_handler", "ghost"],
+                                  "tag": "clear"})
+        self.assertEqual(cleared["unknown"], ["ghost"])
+        self.assertEqual(reflect.load_tags(self.root), {})
+        # bad params at the MCP boundary -> -32602
+        r = mcp.handle_request(
+            {"jsonrpc": "2.0", "id": 1, "method": "eap_graph_reflect",
+             "params": {"nodes": ["x"], "tag": "amazing"}}, engine)
+        self.assertEqual(r["error"]["code"], -32602)
+
+    def test_malformed_reflect_file_degrades_to_no_tags(self):
+        os.makedirs(reflect.context_dir(self.root), exist_ok=True)
+        for payload in (b"{ broken", b"[1,2]",
+                        json.dumps({"m.py::x": "bogus-tag"}).encode()):
+            Path(reflect.reflect_path(self.root)).write_bytes(payload)
+            self.assertEqual(reflect.load_tags(self.root), {})
 
 
 if __name__ == "__main__":

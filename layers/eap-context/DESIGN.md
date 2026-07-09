@@ -37,6 +37,11 @@ hard-freeze choice: it keeps EAP's supply-chain surface at zero. See
   qualified id; edges carry `EXTRACTED` (explicit / same-file) vs `INFERRED`
   (cross-file by name) provenance. Symlinks are not followed out of the root;
   the ignore list covers `.git`, `node_modules`, `.eap`, `dist`, `build`, etc.
+- **Ignore rules** (`src/eap_context/ignore.py`): gitignore-syntax rules from
+  the root `.gitignore` and `.eapignore` (merged, `.eapignore` last so it wins
+  conflicts; `!` negation, dir-only `foo/`, `*`/`?`/`**` globs, last-match-wins)
+  are applied on every build/index walk, on top of the hardcoded defaults —
+  which always prune first, so no negation can re-include `.git` and friends.
 - **Materialized cache**: node-link JSON at `<root>/.eap/graph.json`, written
   atomically. It is a cache, rebuilt when missing or malformed; cached node
   paths are validated to stay relative and within the root (no absolute or
@@ -65,14 +70,42 @@ hard-freeze choice: it keeps EAP's supply-chain surface at zero. See
     min-neighbourhood seeding, sorted-id tie-break — fully reproducible).
   - `centrality()` — Brandes betweenness, with a node-count guard that falls back
     to degree centrality on graphs too large for the O(V·E) computation.
+  - `affected(files|ref)` — change blast radius: symbols in the changed files
+    (explicit list, or `git diff --name-only <ref>` via subprocess with a
+    hostile-ref guard) plus a bounded closure over **incoming** edges only
+    (default depth 2), grouped by distance. Directed on purpose — the reverse
+    closure is "who breaks if this changes".
+- **Git-hook auto-rebuild** (`src/eap_context/hooks.py`): `hook install` writes
+  `post-commit`/`post-checkout` hooks running `build --update` quietly (no
+  daemon); a pre-existing hook is backed up to `<hook>.pre-eap` and chained,
+  never clobbered; `hook uninstall` restores it.
+- **PR tooling** (`src/eap_context/prs.py`): open-PR listing and per-PR impact
+  (changed files → `affected` closure) via the **`gh` CLI over subprocess
+  only** (`gh pr list/view --json`) — no direct HTTP, no token handling;
+  missing/unauthenticated `gh` degrades to a one-line actionable error.
+- **Query log + reflect overlay** (`src/eap_context/reflect.py`): every query
+  appends `{ts, tool, args, top}` to the append-only JSONL at
+  `.eap/context/querylog.jsonl` (best-effort — logging can never fail a
+  query); `eap_graph_reflect` persists `preferred`/`contested` node tags to
+  `.eap/context/reflect.json`, which `query.py` applies as a small seed-score
+  multiplier (1.5× boost / 0.6× penalty). Both files are untrusted input on
+  read and degrade to nothing when malformed. No LLM.
 
 ## Public interface (MCP tools, `eap_graph_*`)
 
 `eap_graph_build`, `eap_graph_query`, `eap_graph_neighbors`, `eap_graph_stats`,
 `eap_graph_godnodes`, `eap_graph_path`, `eap_graph_communities`,
-`eap_graph_central` (8 tools), over JSON-RPC 2.0 stdio (`src/eap_context/mcp.py`),
-plus a `cli.py` (`build [--update]` / `query` / `stats` / `godnodes` /
-`neighbors` / `path` / `communities` / `central` / `serve`).
+`eap_graph_central`, `eap_graph_affected`, `eap_graph_prs`,
+`eap_graph_pr_impact`, `eap_graph_reflect` (12 tools), over JSON-RPC 2.0
+(`src/eap_context/mcp.py`) on **stdio** (default) or the **HTTP transport**
+(`serve --transport http`): a stateless stdlib `ThreadingHTTPServer` POST
+endpoint reusing the same dispatch — binds `127.0.0.1` unless told otherwise,
+requires an API key on every request (constant-time `hmac.compare_digest`;
+explicit flag > `$EAP_CONTEXT_API_KEY` > generated-and-printed once), rejects
+non-POST (405) and bodies over 1 MiB (413). Plus a `cli.py`
+(`build [--update]` / `query` / `stats` / `godnodes` / `neighbors` / `path` /
+`communities` / `central` / `affected` / `hook install|uninstall` / `prs` /
+`serve [--transport http]`).
 
 ## Integration on the EAP spine
 
@@ -85,10 +118,26 @@ plus a `cli.py` (`build [--update]` / `query` / `stats` / `godnodes` /
 ## Runtime & dependencies
 
 Python 3 standard library only — **zero third-party dependencies** (`ast`, `re`,
-`json`, `os`, `math`, `bisect`, `hashlib`, `argparse`, `collections`). No
-tree-sitter, networkx, numpy, rapidfuzz, jieba, or third-party MCP package. The
-layer is optional and independently installable; EAP-Signal and EAP-Runtime work
-without it.
+`json`, `os`, `math`, `bisect`, `hashlib`, `hmac`, `secrets`, `argparse`,
+`collections`, `subprocess`, `shlex`, `http.server`, `threading`). No
+tree-sitter, networkx, numpy, rapidfuzz, jieba, or third-party MCP package.
+External *processes* (`git`, `gh`) are reached via `subprocess` with validated
+arguments — never vendored, never over direct HTTP. The layer is optional and
+independently installable; EAP-Signal and EAP-Runtime work without it.
+
+## Deferred features (tracked debt)
+
+Two upstream-inspired features are consciously deferred, not silently dropped;
+the `eap-lean:` markers below are what the debt harvester collects:
+
+```text
+# eap-lean: per-repo graphs only, no global cross-repo graph — upgrade path:
+#   merge per-root node-link caches under a root-namespace prefix when a
+#   multi-repo question actually shows up.
+# eap-lean: source files only, no manifest ingest (package.json/pyproject/
+#   go.mod dependency edges) — upgrade path: a small manifest extractor
+#   emitting `depends_on` edges when dependency-impact queries appear.
+```
 
 ## Deliberate exclusions (out of scope)
 
@@ -131,3 +180,11 @@ are validated (in-tree relpaths, positive-int lines, control-char rejection,
 referential/consistency integrity) and rejected-then-rebuilt rather than trusted;
 a deeply nested payload that would `RecursionError` is caught the same way. The
 graph algorithms and fuzzy fallback add no dependencies and no non-determinism.
+
+The newer boundaries keep the same discipline: a git *ref* for `affected` is
+rejected unless it is a plain revision word (a leading `-` or embedded
+whitespace/NUL would be parsed as an option or smuggle argv), `gh` output is
+parsed defensively and failures degrade to one-line errors, the HTTP transport
+requires a constant-time-compared key on every request and bounds body size,
+hook install never overwrites a hook it did not write, and the reflect/querylog
+files are validated-on-read like every other cache (malformed → ignored).

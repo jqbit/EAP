@@ -105,9 +105,10 @@ test('real --only claude install lands Signal block + both MCP entries + hooks, 
     // 3. Hooks wired for all lifecycle events (UserPromptSubmit drives the
     //    /eap lean|signal level switches).
     const settings = JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8'));
-    for (const ev of ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PreCompact']) {
+    for (const ev of ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PreCompact', 'Stop']) {
       assert.ok(settings.hooks[ev], `hook event ${ev} present`);
     }
+    assert.match(settings.statusLine.command, /eap-statusline/);   // statusline claimed
     const dump = JSON.stringify(settings);
     assert.match(dump, /eap-dispatch/);
     assert.match(dump, /USER-HOOK/);               // user hook preserved alongside ours
@@ -118,8 +119,9 @@ test('real --only claude install lands Signal block + both MCP entries + hooks, 
     assert.equal(flags.context, true);
     assert.equal(flags.signalStatic, true);        // hook must not re-inject Signal
 
-    // EAP-Lean skills installed + discoverable.
-    for (const s of ['eap-lean-review', 'eap-lean-audit', 'eap-lean-debt']) {
+    // EAP-Lean + EAP-Runtime skills installed + discoverable.
+    for (const s of ['eap-lean-review', 'eap-lean-audit', 'eap-lean-debt', 'eap-lean-gain', 'eap-lean-help',
+      'eap-stats', 'eap-search', 'eap-doctor', 'eap-purge']) {
       assert.ok(existsSync(join(dir, 'skills', s, 'SKILL.md')), `${s} skill installed`);
     }
 
@@ -134,6 +136,7 @@ test('real --only claude install lands Signal block + both MCP entries + hooks, 
     const settings2 = JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8'));
     assert.doesNotMatch(JSON.stringify(settings2), /eap-dispatch/);   // our hooks gone
     assert.match(JSON.stringify(settings2), /USER-HOOK/);             // user hook survives
+    assert.ok(!settings2.statusLine, 'our statusline removed on uninstall');
 
     const mcp2 = existsSync(join(dir, '.mcp.json'))
       ? JSON.parse(readFileSync(join(dir, '.mcp.json'), 'utf8')) : { mcpServers: {} };
@@ -141,7 +144,8 @@ test('real --only claude install lands Signal block + both MCP entries + hooks, 
     assert.ok(!(mcp2.mcpServers && mcp2.mcpServers['eap-context']), 'eap-context removed');
 
     assert.ok(!existsSync(join(dir, '.eap.json')), '.eap.json removed on uninstall');
-    for (const s of ['eap-lean-review', 'eap-lean-audit', 'eap-lean-debt']) {
+    for (const s of ['eap-lean-review', 'eap-lean-audit', 'eap-lean-debt', 'eap-lean-gain', 'eap-lean-help',
+      'eap-stats', 'eap-search', 'eap-doctor', 'eap-purge']) {
       assert.ok(!existsSync(join(dir, 'skills', s, 'SKILL.md')), `${s} skill removed on uninstall`);
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }

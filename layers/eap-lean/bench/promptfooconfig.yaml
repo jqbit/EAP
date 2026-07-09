@@ -1,0 +1,38 @@
+# EAP-Lean benchmark: code size + correctness across two arms, same model, same tasks.
+#
+#   Run:   npx promptfoo@latest eval -c layers/eap-lean/bench/promptfooconfig.yaml --repeat 10
+#   View:  npx promptfoo@latest view
+#
+# Needs ANTHROPIC_API_KEY in the environment or a .env file (see README.md).
+# No results ship with EAP; write yours to results/ (schema in results/README.md).
+description: "EAP-Lean vs no-skill: same model, same tasks. Measures code LOC (deterministic) and functional correctness (gate)."
+
+providers:
+  - id: anthropic:messages:claude-haiku-4-5-20251001
+    config: { max_tokens: 8192, temperature: 1 }
+  - id: anthropic:messages:claude-sonnet-4-6
+    config: { max_tokens: 8192, temperature: 1 }
+  - id: anthropic:messages:claude-opus-4-8
+    config: { max_tokens: 8192, temperature: 1 }
+
+prompts:
+  - id: file://arms/baseline.cjs
+    label: baseline (no skill)
+  - id: file://arms/eap-lean.cjs
+    label: eap-lean
+
+defaultTest:
+  assert:
+    - type: javascript
+      value: file://loc.cjs
+      metric: code_loc
+    - type: javascript
+      value: file://correctness.cjs
+      metric: correct
+
+tests:
+  - vars: { task: "Write me a Python function that validates email addresses." }
+  - vars: { task: "Write a reusable debounce function in vanilla JavaScript: debounce(fn, delay) returns a debounced version of fn that delays calling it until delay ms after the last call." }
+  - vars: { task: "Write Python code that reads sales.csv and sums the 'amount' column." }
+  - vars: { task: "Build me a countdown timer component in React that counts down from a given number of seconds." }
+  - vars: { task: "Add rate limiting to my FastAPI endpoint so users can't spam it." }

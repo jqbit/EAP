@@ -25,8 +25,13 @@ design (drop the persona, keep the compression) is documented in TLDR's
   security, accessibility, hardware calibration, one runnable check). **EAP-Lean
   is a documentation derivative of ponytail, not a concept-only clean room:** its
   rule text, tag vocabulary, scoring strings, and worked examples are close
-  adaptations of ponytail's, and some sentences are verbatim. ponytail is MIT, so
-  this is fully licence-compatible; per MIT its copyright and permission notice
+  adaptations of ponytail's, and some sentences are verbatim. The derivation also
+  covers **code**, not just prose: the example corpus
+  (`layers/eap-lean/examples/`, including clearly-marked verbatim upstream
+  benchmark transcripts) and the benchmark harness
+  (`layers/eap-lean/bench/` — task configs, correctness/LOC gates, runner
+  scripts) are ports of ponytail's `examples/` and `benchmarks/`. ponytail is MIT,
+  so this is fully licence-compatible; per MIT its copyright and permission notice
   is retained in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). What EAP-Lean
   does **not** take is ponytail's runtime (hooks, mode tracker, MCP server) — that
   is reimplemented independently. EAP-Lean is a peer of EAP-Signal (Signal shrinks

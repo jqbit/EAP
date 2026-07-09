@@ -20,6 +20,13 @@ DEFAULT_DEPTH = 3
 DEFAULT_LIMIT = 20
 MAX_SEEDS = 5
 
+# Reflect-tag scoring overlay (see reflect.py): a node explicitly tagged
+# "preferred" gets a seed-score boost, a "contested" node a penalty. Small
+# multipliers on purpose — tags nudge ranking, they never overrule an exact
+# match outright.
+PREFERRED_BOOST = 1.5
+CONTESTED_PENALTY = 0.6
+
 # Fuzzy (typo-tolerant) seeding kicks in only as a FALLBACK: when exact / sub-
 # string / prefix scoring finds fewer than this many candidate seeds, a bounded
 # Levenshtein pass over trigram-pruned candidates recovers misspelled terms.
@@ -319,10 +326,20 @@ def query(
     depth: int = DEFAULT_DEPTH,
     limit: int = DEFAULT_LIMIT,
     degree_cap: int | None = None,
+    tags: dict[str, str] | None = None,
 ) -> dict:
-    """Answer *text* with a compact subgraph + file:line pointers."""
+    """Answer *text* with a compact subgraph + file:line pointers.
+
+    *tags* is the optional reflect overlay ({node_id: "preferred"|"contested"},
+    see reflect.py): applied as a multiplier on seed scores before selection,
+    so a preferred node wins close calls and a contested one loses them.
+    """
     cap = god_node_threshold(g) if degree_cap is None else degree_cap
     scored, token_best = _seed_scores_detailed(g, text)
+    if tags:
+        _mult = {"preferred": PREFERRED_BOOST, "contested": CONTESTED_PENALTY}
+        scored = [(s * _mult.get(tags.get(nid), 1.0), nid) for s, nid in scored]
+        scored.sort(key=lambda p: (-p[0], p[1]))
     seeds = _select_seeds(scored, token_best)
     score_of = {nid: s for s, nid in scored}
 

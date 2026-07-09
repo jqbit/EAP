@@ -9,17 +9,29 @@ Tools exposed:
   eap_graph_path        — shortest path between two symbols (pointers)
   eap_graph_communities — label-propagation community detection
   eap_graph_central     — betweenness/degree centrality ranking
+  eap_graph_affected    — blast radius of changed files (reverse-dep closure)
+  eap_graph_prs         — open PRs via the gh CLI
+  eap_graph_pr_impact   — a PR's changed files -> affected closure
+  eap_graph_reflect     — tag nodes preferred/contested (query-score overlay)
 
 Dispatch is a pure function (`handle_request`) so it is testable without the
 stdio loop. Both MCP-style routing (initialize / tools/list / tools/call) and
 direct method names (method == "eap_graph_query") are accepted.
+
+Transports: newline-delimited JSON-RPC on stdio (`serve`, the default), or a
+stateless localhost-by-default HTTP POST endpoint (`serve_http`) that reuses
+the same dispatch and REQUIRES an API key on every request.
 """
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
+import secrets
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # Allow running as a plain script — the installer registers the server as
 # `python3 <repo>/layers/eap-context/src/eap_context/mcp.py <root>`, i.e. direct
@@ -34,7 +46,9 @@ if __package__ in (None, ""):  # pragma: no cover — exercised via subprocess t
 
 from . import algorithms as alg_mod
 from . import graph as graph_mod
+from . import prs as prs_mod
 from . import query as query_mod
+from . import reflect as reflect_mod
 from .query import DEFAULT_DEPTH, DEFAULT_LIMIT
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -139,13 +153,18 @@ class Engine:
         degree_cap = params.get("degree_cap")
         if degree_cap is not None:
             degree_cap = _coerce_int(degree_cap, "degree_cap")
-        return query_mod.query(
+        result = query_mod.query(
             self.graph(),
             text,
             depth=depth,
             limit=limit,
             degree_cap=degree_cap,
+            tags=reflect_mod.load_tags(self.root),
         )
+        reflect_mod.log_query(
+            self.root, "eap_graph_query",
+            {"query": text, "depth": depth, "limit": limit}, result)
+        return result
 
     def neighbors(self, params: dict) -> dict:
         node = params.get("node") or params.get("name")
@@ -187,6 +206,50 @@ class Engine:
                                "method must be auto|betweenness|degree")
         return alg_mod.centrality(self.graph(), top=top, method=method)
 
+    def affected(self, params: dict) -> dict:
+        files = params.get("files")
+        if files is not None and (not isinstance(files, list) or not all(
+                isinstance(f, str) for f in files)):
+            raise JsonRpcError(INVALID_PARAMS,
+                               "param 'files' must be an array of strings")
+        ref = params.get("ref")
+        if ref is not None and not isinstance(ref, str):
+            raise JsonRpcError(INVALID_PARAMS, "param 'ref' must be a string")
+        if files is None and ref is None:
+            raise JsonRpcError(INVALID_PARAMS,
+                               "provide 'files' (array) or 'ref' (git revision)")
+        depth = _coerce_int(
+            params.get("depth", alg_mod.AFFECTED_DEFAULT_DEPTH), "depth")
+        return alg_mod.affected(self.graph(), files=files, ref=ref,
+                                root=self.root, depth=depth)
+
+    def prs(self, params: dict) -> dict:
+        return prs_mod.list_prs(self.root)
+
+    def pr_impact(self, params: dict) -> dict:
+        number = _coerce_int(params.get("number"), "number") \
+            if params.get("number") is not None else None
+        if number is None:
+            raise JsonRpcError(INVALID_PARAMS,
+                               "missing required integer param 'number'")
+        depth = _coerce_int(
+            params.get("depth", alg_mod.AFFECTED_DEFAULT_DEPTH), "depth")
+        return prs_mod.pr_impact(self.graph(), number, root=self.root, depth=depth)
+
+    def reflect(self, params: dict) -> dict:
+        nodes = params.get("nodes")
+        if nodes is None and isinstance(params.get("node"), str):
+            nodes = [params["node"]]
+        if (not isinstance(nodes, list) or not nodes
+                or not all(isinstance(n, str) for n in nodes)):
+            raise JsonRpcError(INVALID_PARAMS,
+                               "param 'nodes' must be a non-empty array of strings")
+        tag = params.get("tag")
+        if tag not in (*reflect_mod.TAGS, "clear"):
+            raise JsonRpcError(INVALID_PARAMS,
+                               "tag must be preferred|contested|clear")
+        return reflect_mod.set_tags(self.root, self.graph(), nodes, tag)
+
 
 _TOOL_IMPLS = {
     "eap_graph_build": Engine.build,
@@ -197,6 +260,10 @@ _TOOL_IMPLS = {
     "eap_graph_path": Engine.path,
     "eap_graph_communities": Engine.communities,
     "eap_graph_central": Engine.central,
+    "eap_graph_affected": Engine.affected,
+    "eap_graph_prs": Engine.prs,
+    "eap_graph_pr_impact": Engine.pr_impact,
+    "eap_graph_reflect": Engine.reflect,
 }
 
 
@@ -269,6 +336,48 @@ TOOLS = [
             "top": {"type": "integer", "default": 10},
             "method": {"type": "string", "enum": ["auto", "betweenness", "degree"]},
         }, []),
+    },
+    {
+        "name": "eap_graph_affected",
+        "description": ("Blast radius of a change: symbols in the changed files "
+                        "plus everything that depends on them (bounded "
+                        "reverse-dependency closure, grouped by distance). "
+                        "Pass 'files' explicitly or 'ref' to run "
+                        "`git diff --name-only <ref>`."),
+        "inputSchema": _schema({
+            "files": {"type": "array", "items": {"type": "string"}},
+            "ref": {"type": "string"},
+            "depth": {"type": "integer",
+                      "default": alg_mod.AFFECTED_DEFAULT_DEPTH},
+        }, []),
+    },
+    {
+        "name": "eap_graph_prs",
+        "description": ("List open pull requests for the indexed repo "
+                        "(via the gh CLI; requires gh installed + authed)."),
+        "inputSchema": _schema({}, []),
+    },
+    {
+        "name": "eap_graph_pr_impact",
+        "description": ("Blast radius of one PR: its changed files (via the gh "
+                        "CLI) fed through the affected reverse-dependency "
+                        "closure, grouped by distance."),
+        "inputSchema": _schema({
+            "number": {"type": "integer"},
+            "depth": {"type": "integer",
+                      "default": alg_mod.AFFECTED_DEFAULT_DEPTH},
+        }, ["number"]),
+    },
+    {
+        "name": "eap_graph_reflect",
+        "description": ("Tag graph nodes 'preferred' (query-score boost) or "
+                        "'contested' (penalty), or 'clear' the tag. Persisted; "
+                        "applied as a small overlay on future queries."),
+        "inputSchema": _schema({
+            "nodes": {"type": "array", "items": {"type": "string"}},
+            "tag": {"type": "string",
+                    "enum": ["preferred", "contested", "clear"]},
+        }, ["nodes", "tag"]),
     },
 ]
 
@@ -369,6 +478,111 @@ def serve(root: str = ".", stdin=None, stdout=None) -> None:
         if response is not None:
             stdout.write(json.dumps(response) + "\n")
             stdout.flush()
+
+
+# ---------------------------------------------------------------------------
+# HTTP transport (stateless JSON-RPC POST endpoint; stdio stays the default)
+# ---------------------------------------------------------------------------
+
+MAX_HTTP_BODY = 1 << 20  # 1 MiB: no graph query needs more; bounds memory
+API_KEY_ENV = "EAP_CONTEXT_API_KEY"
+
+
+def make_http_server(root: str = ".", host: str = "127.0.0.1", port: int = 8765,
+                     api_key: str | None = None) -> tuple[ThreadingHTTPServer, str]:
+    """Build the HTTP JSON-RPC server; returns (server, api_key).
+
+    Every request must carry the key (``X-API-Key`` header, or
+    ``Authorization: Bearer <key>``); the comparison is constant-time
+    (hmac.compare_digest). Key precedence: explicit arg > $EAP_CONTEXT_API_KEY
+    > freshly generated. Only POST is accepted, bodies are size-bounded, and
+    the endpoint is stateless — one shared Engine behind a lock, no sessions.
+    Binds 127.0.0.1 unless the caller explicitly asks otherwise.
+    """
+    key = api_key or os.environ.get(API_KEY_ENV) or secrets.token_hex(16)
+    engine = Engine(root)
+    lock = threading.Lock()  # eap-lean: global lock serializes requests —
+    # upgrade path: per-request Engine or an RW lock if concurrent read
+    # throughput ever matters.
+
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "eap-context/" + SERVER_INFO["version"]
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):  # quiet by design
+            pass
+
+        def _send(self, status: int, payload: dict) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _authorized(self) -> bool:
+            supplied = self.headers.get("X-API-Key")
+            if not supplied:
+                auth = self.headers.get("Authorization", "")
+                if auth.startswith("Bearer "):
+                    supplied = auth[len("Bearer "):].strip()
+            return bool(supplied) and hmac.compare_digest(
+                supplied.encode("utf-8"), key.encode("utf-8"))
+
+        def do_POST(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler API
+            if not self._authorized():
+                return self._send(401, {"error": "missing or invalid API key"})
+            try:
+                length = int(self.headers.get("Content-Length", ""))
+            except ValueError:
+                return self._send(411, {"error": "Content-Length required"})
+            if length < 0 or length > MAX_HTTP_BODY:
+                return self._send(413, {"error": "request body too large"})
+            try:
+                request = json.loads(self.rfile.read(length))
+            except ValueError:
+                return self._send(200, _error(None, PARSE_ERROR, "parse error"))
+            if not isinstance(request, dict):
+                return self._send(
+                    200, _error(None, INVALID_REQUEST, "request must be an object"))
+            with lock:
+                response = handle_request(request, engine)
+            if response is None:  # notification
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            else:
+                self._send(200, response)
+
+        def _reject_method(self) -> None:
+            self._send(405, {"error": "POST only"})
+
+        do_GET = do_PUT = do_DELETE = do_PATCH = do_HEAD = _reject_method
+
+    return ThreadingHTTPServer((host, port), Handler), key
+
+
+def serve_http(root: str = ".", host: str = "127.0.0.1", port: int = 8765,
+               api_key: str | None = None) -> None:
+    """Serve the JSON-RPC endpoint over HTTP until interrupted."""
+    generated = not (api_key or os.environ.get(API_KEY_ENV))
+    server, key = make_http_server(root, host, port, api_key)
+    bound_host, bound_port = server.server_address[:2]
+    print(f"eap-context: http://{bound_host}:{bound_port}/ (POST, JSON-RPC 2.0)",
+          file=sys.stderr)
+    if generated:
+        # printed once at startup so the operator can hand it to clients;
+        # otherwise the configured key is never echoed back.
+        print(f"eap-context: api key (generated): {key}", file=sys.stderr)
+    else:
+        print("eap-context: api key: (from "
+              + ("--api-key" if api_key else API_KEY_ENV) + ")", file=sys.stderr)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:  # pragma: no cover
+        pass
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":  # pragma: no cover

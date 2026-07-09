@@ -6,8 +6,11 @@
 //   SessionStart  -> emit the Signal rules, (if Runtime installed) the last
 //                    session resume snapshot, and a Context-graph availability
 //                    note.
-//   PreToolUse    -> nudge toward eap_graph_query before a large raw read.
+//   PreToolUse    -> nudge toward eap_graph_query before a large raw read; with
+//                    the opt-in .eap/routing-enforce flag, deny raw network /
+//                    oversize-read paths and redirect to the eap_* equivalent.
 //   PostToolUse   -> offload oversized tool output behind a searchable pointer.
+//   Stop          -> record a turn-end event in the Runtime session log.
 //   PreCompact    -> persist a priority-tiered Runtime session snapshot.
 //
 // INVARIANT: a hook must never crash the agent. Every handler is best-effort and
@@ -42,6 +45,43 @@ function extractSource(input) {
 }
 
 const READ_TOOLS = new Set(['Read', 'Grep', 'Glob', 'Cat', 'View']);
+
+// ── routing deny mode (opt-in via the .eap/routing-enforce flag file) ───────
+// Reason strings are documented in layers/eap-runtime/README.md ("Routing deny
+// mode"). Keep the two in sync.
+export const DENY_REASONS = {
+  bash: 'EAP routing-enforce: network CLIs (curl/wget) are denied in this project. '
+    + 'Use eap_fetch instead — it retrieves the URL through the SSRF-hardened '
+    + 'allowlist and returns reduced text or a searchable pointer.',
+  webfetch: 'EAP routing-enforce: WebFetch is denied in this project. '
+    + 'Use eap_fetch (inline text or pointer) or eap_fetch_and_index (searchable '
+    + 'pointer + vocabulary) instead.',
+  read: (p, bytes, threshold) => `EAP routing-enforce: raw Read of ${p} (${bytes} bytes) exceeds the `
+    + `${threshold}-byte offload threshold. Use eap_execute (extract just the facts in a subprocess) `
+    + `or eap_index + eap_search (lossless chunk retrieval) instead.`,
+};
+
+// Pure deny decision for PreToolUse under routing-enforce. `fileSize` is an
+// injected (path) => bytes|null probe so this stays filesystem-free in tests.
+// Returns a reason string, or null to fall through to the nudge behaviour.
+export function routingDeny(input, { fileSize, threshold = DEFAULT_OFFLOAD_THRESHOLD } = {}) {
+  if (!input || typeof input !== 'object') return null;
+  const tool = input.tool_name;
+  const ti = input.tool_input && typeof input.tool_input === 'object' ? input.tool_input : {};
+  if (tool === 'WebFetch') return DENY_REASONS.webfetch;
+  if (tool === 'Bash') {
+    const cmd = typeof ti.command === 'string' ? ti.command : '';
+    if (/\bcurl\b|\bwget\b/.test(cmd)) return DENY_REASONS.bash;
+    return null;
+  }
+  if (tool === 'Read' && typeof fileSize === 'function') {
+    const p = ti.file_path || ti.path;
+    if (typeof p !== 'string' || !p) return null;
+    const bytes = fileSize(p);
+    if (Number.isFinite(bytes) && bytes > threshold) return DENY_REASONS.read(p, bytes, threshold);
+  }
+  return null;
+}
 
 // ── pure dispatcher ─────────────────────────────────────────────────────────
 // (event, parsed-hook-input, deps) -> result object. Always returns an object
@@ -135,6 +175,13 @@ export async function dispatch(event, input, deps = {}) {
 
     case 'PreToolUse':
       return safe(() => {
+        // Opt-in routing deny mode: when the project's .eap/routing-enforce flag
+        // exists (deps.routingEnforce), hard-deny the raw network/oversize paths
+        // and redirect to the eap_* equivalent. Default: nudge behaviour only.
+        if (deps.routingEnforce) {
+          const reason = routingDeny(input, { fileSize: deps.fileSize, threshold: deps.threshold });
+          if (reason) return { event, deny: reason };
+        }
         if (!deps.contextAvailable) return { event };
         const tool = input && typeof input === 'object' ? input.tool_name : null;
         if (!READ_TOOLS.has(tool)) return { event };
@@ -159,6 +206,15 @@ export async function dispatch(event, input, deps = {}) {
           try { runtime.session.append({ ts: now(), kind: 'tool', summary: `offloaded ${source} (${res.bytes} bytes) -> ${res.pointer}` }); } catch { /* best effort */ }
         }
         return { event, offload: res, additionalContext: res.hint };
+      });
+
+    case 'Stop':
+      return safe(() => {
+        // Turn boundary: record a turn-end event in the session log (same
+        // mechanism as SessionStart/PreCompact; tier-3 ambient kind 'turn').
+        if (!runtime || !runtime.session) return { event };
+        runtime.session.append({ ts: now(), kind: 'turn', summary: 'turn end' });
+        return { event, logged: true };
       });
 
     case 'PreCompact':
@@ -228,7 +284,7 @@ async function run() {
     if (ev === 'SubagentStart' && cfg.lean !== false) {
       try { leanRules = fs.readFileSync(path.join(cfg.root, 'layers', 'eap-lean', 'EAP-LEAN.md'), 'utf8').trim(); } catch { /* optional */ }
     }
-    if (ev === 'SessionStart' || ev === 'PostToolUse' || ev === 'PreCompact') runtime = await buildRuntime(cfg);
+    if (ev === 'SessionStart' || ev === 'PostToolUse' || ev === 'PreCompact' || ev === 'Stop') runtime = await buildRuntime(cfg);
 
     const result = await dispatch(ev, input, {
       signalRules,
@@ -243,10 +299,18 @@ async function run() {
       clearMode: state.clearMode,
       parseSwitch: state.parseSwitch,
       parseDeactivate: state.parseDeactivate,
+      // Routing deny mode is opt-in per project: the flag file lives under the
+      // project's .eap/ dir (same root as runtime.db).
+      routingEnforce: fs.existsSync(path.join(process.cwd(), '.eap', 'routing-enforce')),
+      fileSize: (p) => { try { return fs.statSync(p).size; } catch { return null; } },
       now: () => Date.now(),
     });
 
-    if (result && typeof result.additionalContext === 'string' && result.additionalContext) {
+    if (result && typeof result.deny === 'string' && result.deny) {
+      process.stdout.write(JSON.stringify({
+        hookSpecificOutput: { hookEventName: ev, permissionDecision: 'deny', permissionDecisionReason: result.deny },
+      }) + '\n');
+    } else if (result && typeof result.additionalContext === 'string' && result.additionalContext) {
       process.stdout.write(JSON.stringify({
         hookSpecificOutput: { hookEventName: ev, additionalContext: result.additionalContext },
       }) + '\n');

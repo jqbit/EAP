@@ -28,11 +28,16 @@ out of scope (see **Deliberate exclusions** below).
 layers/eap-context/src/eap_context/
 ├── extract.py    # per-file symbol extraction (Python ast + 10 regex languages)
 ├── graph.py      # walk, adjacency graph, graph.json + incremental index.json cache
-├── query.py      # IDF seed scoring, fuzzy fallback, bounded BFS, god-node cap
-├── algorithms.py # shortest path, communities, centrality (undirected projection)
-├── mcp.py        # JSON-RPC 2.0 over stdio (MCP), pure dispatch
-├── cli.py        # build[--update] / query / stats / godnodes / neighbors /
-│                 #   path / communities / central / serve
+├── ignore.py     # gitignore-syntax rules: .gitignore + .eapignore, merged
+├── query.py      # IDF seed scoring, fuzzy fallback, bounded BFS, god-node cap,
+│                 #   reflect-tag overlay
+├── algorithms.py # shortest path, communities, centrality, affected blast radius
+├── hooks.py      # git post-commit/post-checkout auto-rebuild hooks (no daemon)
+├── prs.py        # open PRs + PR impact via the gh CLI (subprocess only)
+├── reflect.py    # append-only query log (JSONL) + preferred/contested tags
+├── mcp.py        # JSON-RPC 2.0 dispatch; stdio transport + keyed HTTP transport
+├── cli.py        # build[--update] / query / stats / godnodes / neighbors / path /
+│                 #   communities / central / affected / hook / prs / serve
 └── __main__.py   # python3 -m eap_context
 ```
 
@@ -77,6 +82,11 @@ symbols rather than failing the build.
   linked across files — too ambiguous.
 - Ignored directories: `.git`, `node_modules`, `.eap`, `dist`, `build`,
   `__pycache__`, venvs, caches, `vendor`, `target`, and any dot-directory.
+- **`.eapignore`** (gitignore syntax — `!` negation, trailing-`/` dir patterns,
+  `*`/`?`/`**` globs) at the project root is honoured on every build/index walk,
+  merged with the root `.gitignore`; `.eapignore` is evaluated last, so it wins
+  on conflicts. Both run on top of the hardcoded defaults above, which always
+  prune first (a negation can never re-include `.git` and friends).
 - **Cache**: node-link JSON at `<root>/.eap/graph.json` (atomic write via
   temp file + rename). It is a cache, not a second source of truth —
   `load_or_build` rebuilds on a missing or corrupt file.
@@ -120,6 +130,33 @@ lists (`algorithms.py`). All return pointers/ids, never file contents.
 - **`centrality()`** — Brandes betweenness centrality; a node-count guard falls
   back to O(V+E) degree centrality on graphs too large for the O(V·E) computation
   (`method: auto|betweenness|degree`).
+- **`affected(files|ref)`** — change blast radius: symbols defined in a set of
+  changed files (an explicit list, or `git diff --name-only <ref>` run via
+  subprocess) plus everything that depends on them — a bounded BFS over
+  *incoming* edges only (default depth 2), grouped by distance
+  (0 = changed symbols, 1 = direct dependents, …). This one is directed on
+  purpose: the reverse closure is exactly "who breaks if this changes".
+
+## Change-awareness & workflow
+
+- **Git-hook auto-rebuild** — `hook install` writes `post-commit` and
+  `post-checkout` hooks that run the incremental rebuild (`build --update`)
+  quietly after every commit/checkout. No daemon. A pre-existing hook is moved
+  to `<hook>.pre-eap` and chained (never clobbered); `hook uninstall` restores
+  it. The current interpreter path is embedded at install time.
+- **PR tooling** — `prs` lists open PRs and `prs <number>` (MCP:
+  `eap_graph_prs` / `eap_graph_pr_impact`) feeds a PR's changed files through
+  the `affected` closure. Everything goes through the **`gh` CLI via
+  subprocess** (`gh pr list/view --json`) — no direct HTTP, no tokens handled
+  here; a missing or unauthenticated `gh` is a one-line actionable error.
+- **Query log** — every query appends one JSONL record (tool, args, top
+  pointers, timestamp) to `<root>/.eap/context/querylog.jsonl`. Append-only,
+  best-effort (a logging failure never fails a query).
+- **Reflect overlay** — `eap_graph_reflect` tags node ids `preferred` /
+  `contested` (persisted at `<root>/.eap/context/reflect.json`); queries apply
+  the tags as a small seed-score multiplier (boost / penalty) so a tagged node
+  wins or loses close calls without overruling exact matches. No LLM — tags are
+  set explicitly.
 
 ## MCP surface
 
@@ -138,6 +175,21 @@ pure function — testable without the stdio loop.
 | `eap_graph_path` | shortest path between two symbols, as pointers |
 | `eap_graph_communities` | label-propagation community clusters |
 | `eap_graph_central` | betweenness/degree centrality ranking |
+| `eap_graph_affected` | blast radius of changed files (`files` list or git `ref`), grouped by distance |
+| `eap_graph_prs` | open PRs via the `gh` CLI |
+| `eap_graph_pr_impact` | one PR's changed files → affected closure |
+| `eap_graph_reflect` | tag nodes `preferred`/`contested`/`clear` (query-score overlay) |
+
+### HTTP transport
+
+`serve --transport http` exposes the same JSON-RPC dispatch as a **stateless
+POST endpoint** (stdio stays the default). Security posture: binds
+`127.0.0.1` unless `--host` says otherwise; **every request requires an API
+key** (`X-API-Key` or `Authorization: Bearer`, compared constant-time with
+`hmac.compare_digest`; from `--api-key`, `$EAP_CONTEXT_API_KEY`, or generated
+and printed once at startup); non-POST methods get `405`; bodies are bounded
+at 1 MiB (`413`). Stdlib `http.server.ThreadingHTTPServer` — still zero
+dependencies.
 
 ## CLI
 
@@ -152,7 +204,15 @@ python3 -m eap_context neighbors SymbolGraph --root <dir>
 python3 -m eap_context path <symbolA> <symbolB> --root <dir> [--json]
 python3 -m eap_context communities --root <dir> [--min-size N] [--top N] [--json]
 python3 -m eap_context central --root <dir> [--top N] [--method auto|betweenness|degree]
-python3 -m eap_context serve --root <dir>     # MCP stdio server
+python3 -m eap_context affected file1.py file2.py --root <dir> [--depth 2] [--json]
+python3 -m eap_context affected --ref origin/main --root <dir>   # git diff --name-only
+python3 -m eap_context hook install --root <dir>   # post-commit/post-checkout auto-rebuild
+python3 -m eap_context hook uninstall --root <dir>
+python3 -m eap_context prs --root <dir>            # open PRs (gh CLI)
+python3 -m eap_context prs 42 --root <dir>         # PR #42 changed files -> affected
+python3 -m eap_context serve --root <dir>          # MCP stdio server
+python3 -m eap_context serve --root <dir> --transport http [--host 127.0.0.1] \
+    [--port 8765] [--api-key KEY]                  # keyed HTTP JSON-RPC endpoint
 ```
 
 ## Tests
@@ -169,9 +229,14 @@ god-node capping (capped vs uncapped fan-out), JSON cache round-trip and
 poisoned/corrupt-cache rejection, incremental re-index (only-changed-files reuse,
 graph identical to a full build, poisoned/corrupt fingerprint-cache rejection),
 graph algorithms (shortest path / communities / centrality on a known fixture),
-fuzzy typo seeding, and MCP dispatch for all 8 tools (direct method, `tools/call`,
-`-32601` unknown method, `-32602` bad params, notification silence, subprocess
-script launch).
+fuzzy typo seeding, `.eapignore`/`.gitignore` merging and pattern semantics,
+`affected` closure by distance (explicit files, git ref, hostile-ref rejection),
+git-hook install/chain/commit-fires/uninstall-restores, PR tooling with and
+without `gh`, the HTTP transport (key required, constant-time compare, 405 on
+non-POST, 413 on oversized bodies), query-log JSONL and reflect-tag ranking,
+and MCP dispatch for all 12 tools (direct method, `tools/call`, `-32601`
+unknown method, `-32602` bad params, notification silence, subprocess script
+launch).
 
 ## Deliberate exclusions
 

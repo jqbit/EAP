@@ -21,6 +21,7 @@ import os
 import time
 
 from . import extract
+from . import ignore as ignore_mod
 
 GRAPH_VERSION = 1
 CACHE_DIR = ".eap"
@@ -137,23 +138,35 @@ def iter_source_files(root: str, ignore=DEFAULT_IGNORE):
     Symlinks are not followed: a symlinked directory is not descended into and
     a symlinked file is skipped, so out-of-tree source can never be indexed
     under an in-tree path. A realpath containment check backstops both.
+
+    On top of the hardcoded *ignore* set (which always prunes first, so no
+    ignore-file negation can re-include `.git` and friends), gitignore-syntax
+    rules from `<root>/.gitignore` and `<root>/.eapignore` are honoured —
+    merged, `.eapignore` last so it wins on conflicts.
     """
     root = os.path.abspath(root)
     root_real = os.path.realpath(root)
+    rules = ignore_mod.load_rules(root)
     for dirpath, dirnames, filenames in os.walk(root):
+        rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
+        prefix = "" if rel_dir == "." else rel_dir + "/"
         dirnames[:] = sorted(
             d for d in dirnames
             if d not in ignore and not d.startswith(".")
             and not os.path.islink(os.path.join(dirpath, d))
+            and not rules.ignored(prefix + d, True)
         )
         for fname in sorted(filenames):
             if os.path.splitext(fname)[1].lower() in extract.CODE_EXTENSIONS:
+                rel = prefix + fname
+                if rules.ignored(rel, False):
+                    continue
                 ap = os.path.join(dirpath, fname)
                 if os.path.islink(ap):
                     continue  # symlink may point outside the tree
                 if not _within(root_real, os.path.realpath(ap)):
                     continue  # backstop: resolved target escaped the root
-                yield ap, os.path.relpath(ap, root).replace(os.sep, "/")
+                yield ap, rel
 
 
 # ---------------------------------------------------------------------------

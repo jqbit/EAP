@@ -16,10 +16,16 @@ and no randomness), so:
   shortest_path(a, b)  — BFS over the undirected projection; node path pointers.
   communities()        — label-propagation community detection.
   centrality()         — Brandes betweenness, capped; degree fallback.
+  affected(files|ref)  — blast radius: bounded reverse-dependency closure of
+                         the symbols in a set of changed files (this one walks
+                         edges DIRECTED, incoming only — who depends on what
+                         changed).
 """
 
 from __future__ import annotations
 
+import os
+import subprocess
 from collections import defaultdict, deque
 
 from .graph import SymbolGraph
@@ -30,6 +36,9 @@ from .query import resolve_node
 BETWEENNESS_NODE_CAP = 1500
 # Fixed sweep count keeps label propagation deterministic and bounded.
 COMMUNITY_ITERATIONS = 10
+# Default reverse-dependency closure depth for affected(): direct dependents
+# plus their dependents. Deeper radii mostly add noise.
+AFFECTED_DEFAULT_DEPTH = 2
 
 
 def undirected_adj(g: SymbolGraph) -> dict[str, list[str]]:
@@ -180,6 +189,90 @@ def communities(g: SymbolGraph, min_size: int = 1, top: int | None = None) -> di
         "iterations": COMMUNITY_ITERATIONS,
         "node_community": node_community,
         "communities": out,
+    }
+
+
+# ---------------------------------------------------------------------------
+# affected (blast radius: bounded reverse-dependency closure)
+# ---------------------------------------------------------------------------
+
+
+def changed_files_from_git(root: str, ref: str) -> tuple[list[str] | None, str | None]:
+    """``git diff --name-only <ref>`` in *root* -> (files, None) or (None, error).
+
+    *ref* is untrusted input at a subprocess boundary: reject anything that is
+    not a plain revision word (a leading ``-`` would be parsed as a git option,
+    whitespace/NUL can smuggle extra arguments or crash exec).
+    """
+    if (not isinstance(ref, str) or not ref or ref.startswith("-")
+            or any(c in ref for c in " \t\n\r\x00")):
+        return None, f"invalid git ref: {ref!r}"
+    try:
+        proc = subprocess.run(
+            ["git", "-C", os.path.abspath(root), "diff", "--name-only", ref, "--"],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, f"git unavailable: {exc}"
+    if proc.returncode != 0:
+        lines = proc.stderr.strip().splitlines()
+        return None, lines[0] if lines else "git diff failed"
+    return [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()], None
+
+
+def affected(g: SymbolGraph, files: list[str] | None = None,
+             ref: str | None = None, root: str = ".",
+             depth: int = AFFECTED_DEFAULT_DEPTH) -> dict:
+    """Blast radius of a change set: which symbols depend on the changed files.
+
+    Changed files come either from an explicit *files* list or from
+    ``git diff --name-only <ref>`` run in *root* (paths must be graph-relative,
+    i.e. relative to the indexed root — true when the root is the repo root).
+    Every symbol defined in a changed file seeds a bounded BFS over INCOMING
+    edges only (calls/references/imports point dependent -> dependency, so the
+    reverse closure is exactly "who breaks if this changes"). Results are
+    grouped by distance: 0 = the changed symbols themselves, 1 = direct
+    dependents, and so on up to *depth*. Deterministic: sorted seeds, sorted
+    per-node dependent expansion.
+    """
+    if files is None:
+        if ref is None:
+            return {"error": "provide changed 'files' or a git 'ref'"}
+        files, err = changed_files_from_git(root, ref)
+        if err is not None:
+            return {"error": err}
+    files = [f.replace(os.sep, "/") for f in files]
+    fileset = set(files)
+    seeds = sorted(nid for nid, n in g.nodes.items() if n["file"] in fileset)
+
+    dist: dict[str, int] = {nid: 0 for nid in seeds}
+    frontier: deque[str] = deque(seeds)
+    while frontier:
+        nid = frontier.popleft()
+        d = dist[nid]
+        if d >= depth:
+            continue
+        dependents = sorted({g.edges[i]["source"] for i in g.inc.get(nid, ())})
+        for src in dependents:
+            if src not in dist:
+                dist[src] = d + 1
+                frontier.append(src)
+
+    by_distance: dict[int, list[str]] = defaultdict(list)
+    for nid in sorted(dist, key=lambda n: (dist[n], n)):
+        by_distance[dist[nid]].append(nid)
+    groups = [
+        {"distance": d, "symbols": [_node_view(g, nid) for nid in members]}
+        for d, members in sorted(by_distance.items())
+    ]
+    return {
+        "changed_files": files,
+        "matched_files": sorted({g.nodes[nid]["file"] for nid in seeds}),
+        "depth": depth,
+        "total": len(dist),
+        "affected": groups,
+        "pointers": [f"d={d}  {_pointer_line(g, nid)}"
+                     for d, members in sorted(by_distance.items())
+                     for nid in members],
     }
 
 

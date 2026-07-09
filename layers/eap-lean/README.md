@@ -21,7 +21,9 @@ original prose. **No ponytail source code is used.** See
 
 - `EAP-LEAN.md` — the canonical always-on rule (drop into any agent's memory/rules file).
 - `DESIGN.md` — what it is, the concept-derivation from ponytail, how it composes with the other layers.
-- `skills/` — three prompt-only tooling skills (review, audit, debt). No runtime.
+- `skills/` — five prompt-only tooling skills (review, audit, debt, gain, help). No runtime.
+- `examples/` — before/after pairs showing the ladder: benchmark transcripts + hand-written ladder cards.
+- `bench/` — the benchmark harness (promptfoo + Ollama runners, LOC + correctness gates). Ships no numbers; run it yourself.
 
 ## Levels
 
@@ -52,8 +54,10 @@ Brevity never wins over these; they are hard overrides:
 - `skills/eap-lean-review/` — over-engineering review of a diff → a tagged delete-list (`delete`/`stdlib`/`native`/`yagni`/`shrink`) + a `net: -N lines possible` estimate.
 - `skills/eap-lean-audit/` — the same lens repo-wide, ranked biggest cut first.
 - `skills/eap-lean-debt/` — harvest every `eap-lean:` comment into a debt ledger so deferred shortcuts don't rot silently.
+- `skills/eap-lean-gain/` — one-shot measured-only scoreboard (marker count + session net figures). Never a benchmark percentage or per-repo cost claim.
+- `skills/eap-lean-help/` — quick-reference card: levels, skills, switch syntax, deactivation.
 
-All three read and report only — they never apply fixes, and correctness /
+All five read and report only — they never apply fixes, and correctness /
 security / performance bugs are explicitly out of their scope.
 
 ## What it does NOT do

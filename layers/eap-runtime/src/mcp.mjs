@@ -19,6 +19,7 @@
 //   eap_offload            inline-or-pointer decision for arbitrary content
 //   eap_purge              clear the store or a single document
 //   eap_doctor             self-check: node, runtimes, sqlite, store health
+//   eap_upgrade            safe-core self-update: version + pinned release tag + store migrate + doctor + apply plan
 //   eap_session_snapshot   priority-tiered <=2KB snapshot (PreCompact)
 //   eap_session_restore    persisted snapshot + project-memory pointers (SessionStart)
 //
@@ -35,6 +36,8 @@ import { RuntimeStore, probeSqlite } from './store.mjs';
 import { SessionLog } from './session.mjs';
 import { executeScript, executeFile, executeBatch, runtimeAvailability } from './executor.mjs';
 import { fetchUrl } from './fetch.mjs';
+import { indexPath } from './indexdir.mjs';
+import { upgrade as runUpgrade } from './upgrade.mjs';
 
 export const PROTOCOL_VERSION = '2025-06-18';
 export const SERVER_INFO = { name: 'eap-runtime', version: '0.2.0' };
@@ -98,14 +101,16 @@ export const TOOLS = [
   },
   {
     name: 'eap_index',
-    description: 'Chunk and index a blob/string into the local full-text store; returns a pointer descriptor {id, chunks, bytes}.',
+    description: 'Chunk and index content into the local full-text store. Either pass source+content (inline blob), or pass `path` (a file or directory): a directory is walked (binaries skipped, .git/node_modules/.eap excluded, bounded by max files and a per-file byte cap — truncation is reported) and each text file is indexed. Returns pointer descriptor(s).',
     inputSchema: {
       type: 'object',
       properties: {
-        source: { type: 'string', description: 'Label for the content origin (e.g. a path).' },
-        content: { type: 'string' },
+        source: { type: 'string', description: 'Label for the content origin (e.g. a path). Required with `content`.' },
+        content: { type: 'string', description: 'Inline content to index. Required unless `path` is given.' },
+        path: { type: 'string', description: 'File or directory to index instead of inline content.' },
+        maxFiles: { type: 'number', description: 'Directory walk bound (default 200).' },
+        maxFileBytes: { type: 'number', description: 'Per-file byte cap (default 262144); larger files are truncated and flagged.' },
       },
-      required: ['source', 'content'],
     },
   },
   {
@@ -181,6 +186,16 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: {} },
   },
   {
+    name: 'eap_upgrade',
+    description: 'Self-update, safe core: report the current EAP version, resolve the target release tag (explicit tag or the latest vX.Y.Z/RELEASE-* tag via git ls-remote — never a mutable branch), migrate + integrity-check the .eap/ store, re-run doctor, and return the pinned-tag apply plan. Nothing is fetched or executed: no checksum manifest exists yet, so auto-apply is refused rather than pulling unverified code.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tag: { type: 'string', description: 'Explicit release tag (vX.Y.Z or RELEASE-*). Omit to resolve the latest from the remote.' },
+      },
+    },
+  },
+  {
     name: 'eap_session_snapshot',
     description: 'Build and persist a compact priority-tiered session snapshot (<= ~2KB) with per-section retrieval hints. Call at PreCompact.',
     inputSchema: {
@@ -232,6 +247,7 @@ export function createDispatcher({
   session = null,
   execute = executeScript,
   fetch = fetchUrl,
+  upgrade = runUpgrade,
   memoryProbe = () => [],
   now = () => 0,
 } = {}) {
@@ -258,6 +274,11 @@ export function createDispatcher({
       case 'eap_batch_execute':
         return executeBatch(args.scripts, { store, createdAt: now() });
       case 'eap_index':
+        if (typeof args.path === 'string' && args.path) {
+          return indexPath(store, args.path, {
+            maxFiles: args.maxFiles, maxFileBytes: args.maxFileBytes, createdAt: now(),
+          });
+        }
         return store.index(requireString(args, 'source'), requireString(args, 'content'), { createdAt: now() });
       case 'eap_search':
         return { hits: store.search(requireString(args, 'query'), { limit: args.limit ?? 5, docId: args.docId ?? null }) };
@@ -305,6 +326,12 @@ export function createDispatcher({
           runtimes: runtimeAvailability(),
           store: store.health(),
         };
+      case 'eap_upgrade':
+        return upgrade({
+          tag: typeof args.tag === 'string' && args.tag ? args.tag : null,
+          store,
+          doctor: () => callTool('eap_doctor', {}),
+        });
       case 'eap_session_snapshot':
         return log.snapshot({ ts: args.ts ?? now(), maxBytes: args.maxBytes });
       case 'eap_session_restore':

@@ -43,8 +43,11 @@ const CONTEXT_MCP = path.join(REPO_ROOT, 'layers', 'eap-context', 'src', 'eap_co
 const SIGNAL_RULE = path.join(REPO_ROOT, 'layers', 'eap-signal', 'EAP-SIGNAL.md');
 const LEAN_RULE = path.join(REPO_ROOT, 'layers', 'eap-lean', 'EAP-LEAN.md');
 const LEAN_SKILLS_SRC = path.join(REPO_ROOT, 'layers', 'eap-lean', 'skills');
-const LEAN_SKILLS = ['eap-lean-review', 'eap-lean-audit', 'eap-lean-debt'];
+const LEAN_SKILLS = ['eap-lean-review', 'eap-lean-audit', 'eap-lean-debt', 'eap-lean-gain', 'eap-lean-help'];
+const RUNTIME_SKILLS_SRC = path.join(REPO_ROOT, 'layers', 'eap-runtime', 'skills');
+const RUNTIME_SKILLS = ['eap-stats', 'eap-search', 'eap-doctor', 'eap-purge'];
 const HOOK_DISPATCH = path.join(REPO_ROOT, 'src', 'hooks', 'eap-dispatch.mjs');
+const STATUSLINE = path.join(REPO_ROOT, 'src', 'hooks', 'eap-statusline.mjs');
 
 // Managed-block markers (Signal rule) and the hook idempotency marker.
 const SIGNAL_BEGIN = '<!-- eap-signal:begin -->';
@@ -90,6 +93,7 @@ const HOOK_EVENTS = [
   { event: 'PreToolUse', matcher: 'Read|Grep|Glob', timeout: 5 },
   { event: 'PostToolUse', matcher: null, timeout: 10 },
   { event: 'PreCompact', matcher: null, timeout: 10 },
+  { event: 'Stop', matcher: null, timeout: 5 },
 ];
 
 // ── Provider roster ─────────────────────────────────────────────────────────
@@ -374,13 +378,13 @@ function resolveNativeSignal(prov) {
 }
 
 // ── Claude Code install (END-TO-END) ────────────────────────────────────────
-// Copy the three EAP-Lean skills (review/audit/debt) into <configDir>/skills/ so
-// they are discoverable to the agent. Prompt-only markdown; symlink-safe atomic
-// write. Returns an error string on failure, null on success/dry-run.
-function installLeanSkills(configDir, opts) {
+// Copy a layer's skills into <configDir>/skills/ so they are discoverable to
+// the agent. Prompt-only markdown; symlink-safe atomic write. Returns an error
+// string on failure, null on success/dry-run.
+function installSkills(configDir, opts, srcRoot, names) {
   try {
-    for (const name of LEAN_SKILLS) {
-      const src = path.join(LEAN_SKILLS_SRC, name, 'SKILL.md');
+    for (const name of names) {
+      const src = path.join(srcRoot, name, 'SKILL.md');
       if (!fs.existsSync(src)) continue;
       const destDir = path.join(configDir, 'skills', name);
       if (opts.dryRun) continue;
@@ -391,10 +395,10 @@ function installLeanSkills(configDir, opts) {
   } catch (e) { return e.message; }
 }
 
-// Remove installer-placed EAP-Lean skills; leave any user files in those dirs.
-function uninstallLeanSkills(configDir, opts) {
+// Remove installer-placed skills; leave any user files in those dirs.
+function uninstallSkills(configDir, opts, names) {
   let removed = 0;
-  for (const name of LEAN_SKILLS) {
+  for (const name of names) {
     const dir = path.join(configDir, 'skills', name);
     const file = path.join(dir, 'SKILL.md');
     if (!fs.existsSync(file)) continue;
@@ -451,14 +455,24 @@ function installClaude(ctx) {
     else ok(`  [1/3] Signal${leanBody != null ? ' + Lean' : ''} rule written to ${claudeMd}`);
   }
 
-  // 1b. EAP-Lean skills (review/audit/debt) → <configDir>/skills/ so /eap-lean-*
-  // is discoverable. Prompt-only markdown; gated by opts.lean.
+  // 1b. EAP-Lean skills (review/audit/debt/gain/help) → <configDir>/skills/ so
+  // /eap-lean-* is discoverable. Prompt-only markdown; gated by opts.lean.
   if (opts.lean && !opts.dryRun) {
-    const sErr = installLeanSkills(configDir, opts);
+    const sErr = installSkills(configDir, opts, LEAN_SKILLS_SRC, LEAN_SKILLS);
     if (sErr) warn(`  [1/3] EAP-Lean skills install failed: ${sErr}`);
     else ok(`  [1/3] EAP-Lean skills (${LEAN_SKILLS.length}) installed to ${path.join(configDir, 'skills')}`);
   } else if (opts.lean) {
     note(`  [1/3] EAP-Lean skills: copy ${LEAN_SKILLS.length} into ${path.join(configDir, 'skills')}`);
+  }
+
+  // 1c. EAP-Runtime skills (stats/search/doctor/purge) — chat wrappers over the
+  // eap_* MCP tools; gated by opts.runtime.
+  if (opts.runtime && !opts.dryRun) {
+    const rErr = installSkills(configDir, opts, RUNTIME_SKILLS_SRC, RUNTIME_SKILLS);
+    if (rErr) warn(`  [1/3] EAP-Runtime skills install failed: ${rErr}`);
+    else ok(`  [1/3] EAP-Runtime skills (${RUNTIME_SKILLS.length}) installed to ${path.join(configDir, 'skills')}`);
+  } else if (opts.runtime) {
+    note(`  [1/3] EAP-Runtime skills: copy ${RUNTIME_SKILLS.length} into ${path.join(configDir, 'skills')}`);
   }
 
   // 2. MCP servers.
@@ -514,6 +528,10 @@ function installClaude(ctx) {
           command: `"${node}" "${HOOK_DISPATCH}" ${event} "${eapConfPath}"`,
           marker: HOOK_MARKER, matcher: matcher || undefined, timeout,
         });
+      }
+      // Statusline: only claim the slot if the user hasn't set one — never clobber.
+      if (!isPlainObject(settings.statusLine)) {
+        settings.statusLine = { type: 'command', command: `"${node}" "${STATUSLINE}"` };
       }
       validateHookFields(settings, warn);
       writeSettings(settingsPath, settings);
@@ -767,9 +785,9 @@ function uninstall(ctx) {
     if (stripped) ok(text === '' ? `  removed ${claudeMd}` : `  stripped EAP blocks from ${claudeMd}`);
   }
 
-  // 1b. EAP-Lean skills.
-  const skillsRemoved = uninstallLeanSkills(configDir, opts);
-  if (skillsRemoved) ok(`  removed ${skillsRemoved} EAP-Lean skill(s) from ${path.join(configDir, 'skills')}`);
+  // 1b. EAP-Lean + EAP-Runtime skills.
+  const skillsRemoved = uninstallSkills(configDir, opts, [...LEAN_SKILLS, ...RUNTIME_SKILLS]);
+  if (skillsRemoved) ok(`  removed ${skillsRemoved} EAP skill(s) from ${path.join(configDir, 'skills')}`);
 
   // 2. MCP servers. Remove at --scope user to match the install scope.
   if (useCli) {
@@ -796,6 +814,11 @@ function uninstall(ctx) {
     const settings = readSettings(settingsPath);
     if (settings) {
       const removed = removeCommandHooks(settings, HOOK_MARKER);
+      // Statusline: remove only if it is ours (points at eap-statusline).
+      if (isPlainObject(settings.statusLine) && typeof settings.statusLine.command === 'string'
+        && settings.statusLine.command.includes('eap-statusline')) {
+        delete settings.statusLine;
+      }
       validateHookFields(settings, warn);
       if (!opts.dryRun) {
         // Drop a now-empty stub we created; otherwise write the trimmed settings.
