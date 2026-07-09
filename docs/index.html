@@ -88,12 +88,12 @@ code, pre, .mono { font-family: var(--mono); }
 
 /* ---------- MEMBRANE DIAGRAM ---------- */
 .flow-wrap { margin: 64px auto 0; max-width: 920px; }
-.flow { border: 1px solid var(--hairline-2); border-radius: 14px; background: var(--surface); padding: 38px 28px 30px; overflow-x: auto; }
-.flow-lane { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 700px; }
+.flow { border: 1px solid var(--hairline-2); border-radius: 14px; background: var(--surface); padding: 34px 18px 28px; overflow-x: auto; }
+.flow-lane { display: flex; align-items: center; justify-content: space-between; gap: 4px; min-width: 620px; }
 .flow-node { text-align: center; flex: 0 0 auto; }
-.flow-node .box { border: 1px solid var(--hairline-2); border-radius: 8px; padding: 10px 14px; font-family: var(--mono); font-size: 0.72rem; color: var(--ink-2); background: var(--bg); }
+.flow-node .box { border: 1px solid var(--hairline-2); border-radius: 8px; padding: 8px 11px; font-family: var(--mono); font-size: 0.68rem; color: var(--ink-2); background: var(--bg); white-space: nowrap; }
 .flow-node.gate .box { border-color: var(--accent); color: var(--ink); background: var(--accent-soft); }
-.flow-node .cap { margin-top: 8px; font-size: 0.66rem; font-family: var(--mono); color: var(--ink-3); letter-spacing: 0.05em; text-transform: uppercase; }
+.flow-node .cap { margin-top: 8px; font-size: 0.58rem; font-family: var(--mono); color: var(--ink-3); letter-spacing: 0.04em; text-transform: uppercase; white-space: nowrap; }
 .flow-link { flex: 1 1 0; height: 2px; position: relative; background: var(--hairline-2); min-width: 24px; overflow: visible; }
 .flow-link .tok { position: absolute; top: 50%; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); transform: translate(-50%, -50%); animation: tokMove 2.6s linear infinite; }
 .flow-link .tok.t2 { animation-delay: 0.9s; opacity: 0.7; }
@@ -246,7 +246,7 @@ table.bench { width: 100%; border-collapse: collapse; font-size: 0.84rem; min-wi
   <div class="flow-wrap" id="membranes">
     <div class="flow" role="img" aria-label="Diagram: files flow through the Context gate into reasoning, tool output flows through the Runtime gate, prose flows through the Signal gate to the user — the token stream narrows at every gate.">
       <div class="flow-lane">
-        <div class="flow-node"><div class="box">files · repos · docs</div><div class="cap">source</div></div>
+        <div class="flow-node"><div class="box">files · repos</div><div class="cap">source</div></div>
         <div class="flow-link"><span class="tok"></span><span class="tok t2"></span><span class="tok t3"></span></div>
         <div class="flow-node gate"><div class="box">CONTEXT</div><div class="cap">graph route → file:line</div></div>
         <div class="flow-link thin"><span class="tok"></span><span class="tok t2"></span></div>
