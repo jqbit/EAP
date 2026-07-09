@@ -6,7 +6,7 @@ and safety-critical text byte-exact.
 
 This is the **output membrane** of EAP. It is prompt-only: no runtime, no
 network, no dependency. It is the perfected TLDR prompt
-(https://github.com/ZeroPointNineBar/TLDR), which itself descends — with attribution — from
+(https://github.com/0point9bar/TLDR), which itself descends — with attribution — from
 caveman by Julius Brussee. See `../../docs/legal/ATTRIBUTION.md`.
 
 ## Files

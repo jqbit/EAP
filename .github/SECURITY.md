@@ -6,8 +6,8 @@ Only the `main` branch is supported.
 
 ## Reporting a Vulnerability
 
-- **Sensitive issues:** please use [GitHub security advisories](https://github.com/ZeroPointNineBar/EAP/security/advisories/new).
-- **Non-sensitive issues:** open a regular [issue](https://github.com/ZeroPointNineBar/EAP/issues).
+- **Sensitive issues:** please use [GitHub security advisories](https://github.com/0point9bar/EAP/security/advisories/new).
+- **Non-sensitive issues:** open a regular [issue](https://github.com/0point9bar/EAP/issues).
 
 Target response time: **within 7 days** for valid vulnerability reports. Best-effort, not a paid-support SLA.
 

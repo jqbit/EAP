@@ -44,13 +44,13 @@ See `docs/ARCHITECTURE.md` for the full design and `EAP.md` for the protocol.
 **One line — macOS / Linux / Git Bash / WSL:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ZeroPointNineBar/EAP/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/0point9bar/EAP/main/install.sh | bash
 ```
 
 **One line — Windows PowerShell:**
 
 ```powershell
-irm https://raw.githubusercontent.com/ZeroPointNineBar/EAP/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/0point9bar/EAP/main/install.ps1 | iex
 ```
 
 Either bootstrap checks git + Node ≥ 22, clones the repo, and launches an
@@ -59,7 +59,7 @@ which agents and which layers (Signal / Runtime / Context) to wire. The TUI
 reads from your terminal even through `curl | bash`. To skip the prompts in
 automation, append flags: `… | bash -s -- --only claude --non-interactive`.
 
-> The bare `curl`/`irm` one-liner requires the `ZeroPointNineBar/EAP` repo to be **public**
+> The bare `curl`/`irm` one-liner requires the `0point9bar/EAP` repo to be **public**
 > (raw URLs and anonymous `git clone` don't work on private repos). Until then,
 > clone it yourself and run the installer directly (below).
 

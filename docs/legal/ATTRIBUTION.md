@@ -1,7 +1,7 @@
 # Attribution & Provenance
 
 **EAP** (Efficient Agent Protocol) is an independent, MIT-licensed project
-maintained solely by [ZeroPointNineBar](https://github.com/ZeroPointNineBar). It is a self-contained
+maintained solely by [ZeroPointNineBar](https://github.com/0point9bar). It is a self-contained
 hard fork/freeze with no upstream runtime dependency. This file records the
 lineage of every idea and every line of third-party code, per layer.
 

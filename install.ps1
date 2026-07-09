@@ -1,9 +1,9 @@
 # EAP — one-line installer for Windows PowerShell.
 #
-#   irm https://raw.githubusercontent.com/ZeroPointNineBar/EAP/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/0point9bar/EAP/main/install.ps1 | iex
 #
 # Pass flags via the EAP_ARGS env var, e.g.:
-#   $env:EAP_ARGS='--only claude'; irm https://raw.githubusercontent.com/ZeroPointNineBar/EAP/main/install.ps1 | iex
+#   $env:EAP_ARGS='--only claude'; irm https://raw.githubusercontent.com/0point9bar/EAP/main/install.ps1 | iex
 #
 # Env overrides: EAP_HOME (checkout dir, default ~\.eap-src), EAP_REPO
 # (owner/repo), EAP_BRANCH (default main), EAP_NONINTERACTIVE=1.
@@ -12,7 +12,7 @@
 # the Node installer (interactive TUI in the console, or flags for automation).
 $ErrorActionPreference = 'Stop'
 
-$Repo    = if ($env:EAP_REPO)   { $env:EAP_REPO }   else { 'ZeroPointNineBar/EAP' }
+$Repo    = if ($env:EAP_REPO)   { $env:EAP_REPO }   else { '0point9bar/EAP' }
 $Branch  = if ($env:EAP_BRANCH) { $env:EAP_BRANCH } else { 'main' }
 $EapHome = if ($env:EAP_HOME)   { $env:EAP_HOME }   else { Join-Path $HOME '.eap-src' }
 

@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EAP — Efficient Agent Protocol</title>
+<meta name="description" content="EAP compresses an AI coding agent's token usage at all three membranes — input (Context), working (Runtime), output (Signal) — plus the code it writes (Lean). Local, deterministic, no-LLM, no-network. MIT, zero dependencies, honest claims only.">
+<link rel="icon" type="image/svg+xml" href="assets/eap-mark.svg">
+<link rel="canonical" href="https://0point9bar.github.io/EAP/">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://0point9bar.github.io/EAP/">
+<meta property="og:title" content="EAP — Efficient Agent Protocol">
+<meta property="og:description" content="Justify every token — in, through, and out. Three compression membranes + a minimal-code discipline for AI coding agents. Reproducible claims only.">
+<!-- Self-contained: system font stacks only. Rendering this page contacts no
+     external host (no webfont/CDN visitor-IP disclosure). -->
+<style>
+:root {
+  --bg: #06070A;
+  --surface: #0C0E12;
+  --surface-2: #12151B;
+  --hairline: #1D2129;
+  --hairline-2: #2B3039;
+  --ink: #F2F4F3;
+  --ink-2: #9DA6A1;
+  --ink-3: #67706B;
+  --accent: #2EE6A8;
+  --accent-soft: rgba(46, 230, 168, 0.1);
+  --warm: #FF6B4A;
+  --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+body {
+  background: var(--bg); color: var(--ink);
+  font-family: var(--sans); letter-spacing: -0.011em;
+  -webkit-font-smoothing: antialiased; line-height: 1.6;
+}
+::selection { background: var(--accent); color: #04231A; }
+a { color: inherit; }
+code, pre, .mono { font-family: var(--mono); }
+.skip-link { position: absolute; left: -9999px; top: 0; z-index: 200; background: var(--accent); color: #04231A; padding: 8px 16px; border-radius: 0 0 6px 0; }
+.skip-link:focus { left: 0; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+
+.bg-grid {
+  position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background-image: linear-gradient(to right, rgba(255,255,255,0.022) 1px, transparent 1px),
+                    linear-gradient(to bottom, rgba(255,255,255,0.022) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse 90% 60% at 50% 0%, black 30%, transparent 75%);
+  -webkit-mask-image: radial-gradient(ellipse 90% 60% at 50% 0%, black 30%, transparent 75%);
+}
+.container { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+
+/* ---------- NAV ---------- */
+.nav { position: sticky; top: 0; z-index: 100; border-bottom: 1px solid var(--hairline); background: rgba(6,7,10,0.82); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+.nav-inner { display: flex; align-items: center; gap: 28px; height: 60px; }
+.nav-brand { display: flex; align-items: center; gap: 10px; font-weight: 650; text-decoration: none; font-size: 1rem; margin-right: auto; }
+.nav-brand img { width: 26px; height: 26px; border-radius: 6px; }
+.nav a.nav-link { color: var(--ink-2); text-decoration: none; font-size: 0.875rem; transition: color 0.15s; }
+.nav a.nav-link:hover { color: var(--ink); }
+.nav-gh { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--hairline-2); border-radius: 6px; padding: 7px 14px; font-size: 0.85rem; text-decoration: none; color: var(--ink); transition: border-color 0.15s, background 0.15s; }
+.nav-gh:hover { border-color: var(--ink-3); background: var(--surface); }
+@media (max-width: 760px) { .nav a.nav-link { display: none; } }
+
+/* ---------- HERO ---------- */
+.hero { padding: 100px 0 64px; text-align: center; }
+.hero-badge { display: inline-flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2); border: 1px solid var(--hairline-2); border-radius: 99px; padding: 5px 12px; margin-bottom: 30px; }
+.hero-badge .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.hero h1 { font-size: clamp(2.4rem, 5.6vw, 3.9rem); line-height: 1.05; font-weight: 640; letter-spacing: -0.045em; margin: 0 auto 20px; max-width: 800px; }
+.hero h1 em { font-style: normal; color: var(--accent); }
+.hero-sub { color: var(--ink-2); font-size: 1.08rem; max-width: 660px; margin: 0 auto 38px; }
+.hero-sub strong { color: var(--ink); font-weight: 550; }
+.cmd { display: flex; align-items: center; background: var(--surface); border: 1px solid var(--hairline-2); border-radius: 8px; padding: 5px 5px 5px 16px; max-width: 640px; margin: 0 auto; text-align: left; }
+.cmd .prompt-char { color: var(--accent); font-family: var(--mono); margin-right: 12px; user-select: none; }
+.cmd code { flex: 1; font-size: 0.85rem; color: var(--ink); overflow-x: auto; white-space: nowrap; scrollbar-width: none; padding: 8px 12px 8px 0; }
+.copy-btn { flex-shrink: 0; background: var(--ink); color: var(--bg); border: none; border-radius: 5px; padding: 9px 16px; font-size: 0.8rem; font-weight: 600; cursor: pointer; font-family: var(--sans); transition: transform 0.1s; }
+.copy-btn:active { transform: scale(0.96); }
+.copy-btn.copied { background: var(--accent); color: #04231A; }
+.hero-links { margin-top: 18px; font-size: 0.85rem; color: var(--ink-3); }
+.hero-links a { color: var(--ink-2); text-decoration: none; border-bottom: 1px solid var(--hairline-2); }
+.hero-links a:hover { color: var(--ink); }
+
+/* ---------- MEMBRANE DIAGRAM ---------- */
+.flow-wrap { margin: 64px auto 0; max-width: 920px; }
+.flow { border: 1px solid var(--hairline-2); border-radius: 14px; background: var(--surface); padding: 38px 28px 30px; overflow-x: auto; }
+.flow-lane { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 700px; }
+.flow-node { text-align: center; flex: 0 0 auto; }
+.flow-node .box { border: 1px solid var(--hairline-2); border-radius: 8px; padding: 10px 14px; font-family: var(--mono); font-size: 0.72rem; color: var(--ink-2); background: var(--bg); }
+.flow-node.gate .box { border-color: var(--accent); color: var(--ink); background: var(--accent-soft); }
+.flow-node .cap { margin-top: 8px; font-size: 0.66rem; font-family: var(--mono); color: var(--ink-3); letter-spacing: 0.05em; text-transform: uppercase; }
+.flow-link { flex: 1 1 0; height: 2px; position: relative; background: var(--hairline-2); min-width: 24px; overflow: visible; }
+.flow-link .tok { position: absolute; top: 50%; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); transform: translate(-50%, -50%); animation: tokMove 2.6s linear infinite; }
+.flow-link .tok.t2 { animation-delay: 0.9s; opacity: 0.7; }
+.flow-link .tok.t3 { animation-delay: 1.8s; opacity: 0.45; }
+.flow-link.thin .tok { width: 5px; height: 5px; }
+.flow-link.thinner .tok { width: 4px; height: 4px; }
+.flow-link.thinnest .tok { width: 3px; height: 3px; }
+@keyframes tokMove { 0% { left: 0%; } 100% { left: 100%; } }
+@media (prefers-reduced-motion: reduce) { .flow-link .tok { display: none; } }
+.flow-caption { display: flex; justify-content: center; gap: 24px; flex-wrap: wrap; margin-top: 26px; font-family: var(--mono); font-size: 0.7rem; color: var(--ink-3); }
+.flow-caption span::before { content: "· "; color: var(--accent); }
+
+/* ---------- SECTIONS ---------- */
+.section { padding: 104px 0; }
+.kicker { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); display: block; margin-bottom: 14px; }
+.section h2 { font-size: clamp(1.7rem, 3.4vw, 2.4rem); font-weight: 620; letter-spacing: -0.035em; line-height: 1.12; margin-bottom: 14px; }
+.section .lede { color: var(--ink-2); max-width: 660px; font-size: 1rem; }
+.section .lede a, .section .lede code a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--hairline-2); }
+.section .lede a:hover { border-color: var(--ink-2); }
+
+/* ---------- LAYER CARDS ---------- */
+.layers { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 44px; }
+@media (max-width: 860px) { .layers { grid-template-columns: 1fr; } }
+.layer { border: 1px solid var(--hairline-2); border-radius: 12px; background: var(--surface); padding: 28px; display: flex; flex-direction: column; gap: 12px; }
+.layer-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.layer h3 { font-family: var(--mono); font-size: 1rem; font-weight: 600; }
+.layer .membrane { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.07em; text-transform: uppercase; color: var(--ink-3); border: 1px solid var(--hairline-2); border-radius: 4px; padding: 2px 7px; }
+.badge { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.05em; text-transform: uppercase; border-radius: 4px; padding: 2px 7px; margin-left: auto; }
+.badge.shipping { color: var(--accent); border: 1px solid rgba(46,230,168,0.4); background: var(--accent-soft); }
+.badge.built { color: #8FB6FF; border: 1px solid rgba(143,182,255,0.35); background: rgba(143,182,255,0.07); }
+.layer p { color: var(--ink-2); font-size: 0.9rem; }
+.layer ul { list-style: none; margin-top: 2px; }
+.layer li { color: var(--ink-3); font-size: 0.82rem; padding: 3px 0 3px 16px; position: relative; }
+.layer li::before { content: "·"; position: absolute; left: 2px; color: var(--accent); }
+.layer li strong { color: var(--ink-2); font-weight: 550; }
+.substrate { margin-top: 20px; border: 1px dashed var(--hairline-2); border-radius: 10px; padding: 16px 22px; font-family: var(--mono); font-size: 0.76rem; color: var(--ink-3); display: flex; gap: 22px; flex-wrap: wrap; justify-content: center; }
+.substrate span::before { content: "◆ "; color: var(--accent); font-size: 0.6rem; }
+
+/* ---------- BENCH ---------- */
+.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-top: 44px; }
+@media (max-width: 860px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
+.tile { border: 1px solid var(--hairline-2); border-radius: 12px; background: var(--surface); padding: 24px; }
+.tile .n { font-size: 2rem; font-weight: 640; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+.tile .n em { font-style: normal; color: var(--accent); }
+.tile .l { font-size: 0.76rem; color: var(--ink-3); margin-top: 6px; font-family: var(--mono); letter-spacing: 0.04em; text-transform: uppercase; line-height: 1.5; }
+.bench-wrap { margin-top: 26px; border: 1px solid var(--hairline-2); border-radius: 12px; background: var(--surface); overflow-x: auto; }
+table.bench { width: 100%; border-collapse: collapse; font-size: 0.84rem; min-width: 680px; }
+.bench th { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); text-align: right; padding: 14px 18px; border-bottom: 1px solid var(--hairline); font-weight: 500; }
+.bench th:first-child, .bench td:first-child { text-align: left; }
+.bench td { padding: 12px 18px; border-bottom: 1px solid var(--hairline); color: var(--ink-2); text-align: right; font-variant-numeric: tabular-nums; }
+.bench tr:last-child td { border-bottom: none; }
+.bench tbody tr:hover { background: var(--surface-2); }
+.bench td:first-child { font-family: var(--mono); font-size: 0.78rem; color: var(--ink); }
+.bench .kind { color: var(--ink-3); font-size: 0.7rem; font-family: var(--mono); }
+.bench .b0 { color: var(--ink-3); text-decoration: line-through; text-decoration-color: rgba(255,255,255,0.25); }
+.bench .delta-pos { color: var(--accent); font-family: var(--mono); }
+.bench .delta-neg { color: var(--warm); font-family: var(--mono); }
+.bench .ok { color: var(--accent); font-family: var(--mono); }
+.bench tfoot td { border-top: 1px solid var(--hairline-2); font-weight: 600; color: var(--ink); background: rgba(46,230,168,0.04); }
+.bench-notes { margin-top: 16px; font-size: 0.8rem; color: var(--ink-3); max-width: 760px; }
+.bench-notes a { color: var(--ink-2); text-decoration: none; border-bottom: 1px solid var(--hairline-2); }
+.bench-notes a:hover { color: var(--ink); }
+.rules-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--hairline-2); border: 1px solid var(--hairline-2); border-radius: 12px; overflow: hidden; margin-top: 40px; }
+@media (max-width: 860px) { .rules-grid { grid-template-columns: 1fr; } }
+.rules-grid > div { background: var(--surface); padding: 24px; }
+.rules-grid h3 { font-size: 0.9rem; font-weight: 600; margin-bottom: 8px; }
+.rules-grid p { color: var(--ink-2); font-size: 0.83rem; }
+.rules-grid .no { font-family: var(--mono); font-size: 0.68rem; color: var(--accent); display: block; margin-bottom: 10px; }
+
+/* ---------- INSTALL ---------- */
+.tabs { margin-top: 44px; }
+.tab-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.tab-row button { background: none; border: 1px solid var(--hairline-2); color: var(--ink-2); border-radius: 8px 8px 0 0; border-bottom: none; padding: 10px 18px; font-size: 0.85rem; cursor: pointer; font-family: var(--sans); }
+.tab-row button.active { background: var(--surface); color: var(--ink); position: relative; }
+.tab-row button.active::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px; background: var(--surface); }
+.tab-panel { border: 1px solid var(--hairline-2); border-radius: 0 12px 12px 12px; background: var(--surface); padding: 26px; display: none; }
+.tab-panel.active { display: block; }
+.tab-panel .cmd { max-width: 100%; background: var(--bg); margin: 0; }
+.tab-panel p.note { margin-top: 14px; font-size: 0.85rem; color: var(--ink-3); }
+.tab-panel p.note a { color: var(--ink-2); text-decoration: none; border-bottom: 1px solid var(--hairline-2); }
+.tab-panel pre { background: var(--bg); border: 1px solid var(--hairline); border-radius: 8px; padding: 16px 18px; overflow-x: auto; font-size: 0.8rem; line-height: 1.7; color: var(--ink-2); margin-top: 12px; }
+.matrix { margin-top: 40px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+@media (max-width: 860px) { .matrix { grid-template-columns: 1fr; } }
+.matrix-card { border: 1px solid var(--hairline-2); border-radius: 12px; background: var(--surface); padding: 24px; }
+.matrix-card h3 { font-size: 0.92rem; font-weight: 600; margin-bottom: 4px; }
+.matrix-card .sub { font-family: var(--mono); font-size: 0.68rem; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.06em; }
+.matrix-card p { color: var(--ink-2); font-size: 0.85rem; margin-top: 10px; }
+.matrix-card .agents { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
+.matrix-card .agents span { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-2); border: 1px solid var(--hairline-2); border-radius: 4px; padding: 2px 8px; }
+
+/* ---------- SECURITY ---------- */
+.sec-card { margin-top: 44px; border: 1px solid var(--hairline-2); border-radius: 12px; background: var(--surface); padding: 32px; }
+.sec-card h3 { font-size: 1.05rem; font-weight: 600; margin-bottom: 10px; }
+.sec-card > p { color: var(--ink-2); font-size: 0.92rem; max-width: 760px; }
+.sec-card ul { list-style: none; margin-top: 18px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px 28px; }
+@media (max-width: 800px) { .sec-card ul { grid-template-columns: 1fr; } }
+.sec-card li { color: var(--ink-2); font-size: 0.85rem; padding: 6px 0 6px 22px; position: relative; }
+.sec-card li::before { content: "✓"; position: absolute; left: 0; color: var(--accent); font-family: var(--mono); }
+.sec-card li code { font-size: 0.78rem; color: var(--ink); }
+
+/* ---------- FOOTER ---------- */
+.footer { border-top: 1px solid var(--hairline); padding: 56px 0; }
+.footer-grid { display: flex; justify-content: space-between; gap: 32px; flex-wrap: wrap; }
+.footer .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+.footer .brand img { width: 22px; height: 22px; border-radius: 5px; }
+.footer p { color: var(--ink-3); font-size: 0.82rem; margin-top: 10px; max-width: 400px; }
+.footer p a { color: var(--ink-2); }
+.footer-col h4 { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-3); margin-bottom: 14px; font-weight: 500; }
+.footer-col a { display: block; color: var(--ink-2); text-decoration: none; font-size: 0.85rem; padding: 4px 0; }
+.footer-col a:hover { color: var(--ink); }
+.footer-base { margin-top: 44px; padding-top: 22px; border-top: 1px solid var(--hairline); display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; font-size: 0.8rem; color: var(--ink-3); }
+.footer-base a { color: var(--ink-2); text-decoration: none; }
+
+.reveal { opacity: 0; transform: translateY(24px); transition: opacity 0.8s ease, transform 0.8s cubic-bezier(0.22, 1, 0.36, 1); }
+.reveal.visible { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) { .reveal { opacity: 1; transform: none; } }
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="bg-grid" aria-hidden="true"></div>
+
+<nav class="nav" aria-label="Main">
+  <div class="container nav-inner">
+    <a class="nav-brand" href="#top"><img src="assets/eap-mark.svg" alt=""> EAP</a>
+    <a class="nav-link" href="#membranes">Membranes</a>
+    <a class="nav-link" href="#layers">Layers</a>
+    <a class="nav-link" href="#numbers">Numbers</a>
+    <a class="nav-link" href="#install">Install</a>
+    <a class="nav-link" href="#security">Security</a>
+    <a class="nav-gh" href="https://github.com/0point9bar/EAP" target="_blank" rel="noopener">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<main id="main">
+<header class="hero container" id="top">
+  <span class="hero-badge"><span class="dot" aria-hidden="true"></span> 0point9bar / EAP · MIT · zero dependencies</span>
+  <h1>Justify every token —<br><em>in, through, and out.</em></h1>
+  <p class="hero-sub"><strong>EAP — Efficient Agent Protocol</strong> compresses an AI coding agent's token usage at all three points of the token lifecycle — <strong>input</strong> (Context), <strong>working</strong> (Runtime), <strong>output</strong> (Signal) — plus the <strong>code it writes</strong> (Lean). One installer, one hook dispatcher, four disciplines. Local, deterministic, no LLM, no network.</p>
+  <div class="cmd">
+    <span class="prompt-char" aria-hidden="true">❯</span>
+    <code>curl -fsSL https://raw.githubusercontent.com/0point9bar/EAP/main/install.sh | bash</code>
+    <button class="copy-btn" data-copy="curl -fsSL https://raw.githubusercontent.com/0point9bar/EAP/main/install.sh | bash" aria-label="Copy install command">Copy</button>
+  </div>
+  <p class="hero-links">Interactive TUI — picks up your installed agents. Windows &amp; flags: <a href="#install">install</a> · protocol: <a href="https://github.com/0point9bar/EAP/blob/main/EAP.md" target="_blank" rel="noopener">EAP.md</a></p>
+
+  <div class="flow-wrap" id="membranes">
+    <div class="flow" role="img" aria-label="Diagram: files flow through the Context gate into reasoning, tool output flows through the Runtime gate, prose flows through the Signal gate to the user — the token stream narrows at every gate.">
+      <div class="flow-lane">
+        <div class="flow-node"><div class="box">files · repos · docs</div><div class="cap">source</div></div>
+        <div class="flow-link"><span class="tok"></span><span class="tok t2"></span><span class="tok t3"></span></div>
+        <div class="flow-node gate"><div class="box">CONTEXT</div><div class="cap">graph route → file:line</div></div>
+        <div class="flow-link thin"><span class="tok"></span><span class="tok t2"></span></div>
+        <div class="flow-node"><div class="box">reasoning</div><div class="cap">agent turn</div></div>
+        <div class="flow-link thin"><span class="tok"></span><span class="tok t2"></span></div>
+        <div class="flow-node gate"><div class="box">RUNTIME</div><div class="cap">exec offload → summary</div></div>
+        <div class="flow-link thinner"><span class="tok"></span></div>
+        <div class="flow-node gate"><div class="box">SIGNAL</div><div class="cap">verdict-first prose</div></div>
+        <div class="flow-link thinnest"><span class="tok"></span></div>
+        <div class="flow-node"><div class="box">user</div><div class="cap">output</div></div>
+      </div>
+      <div class="flow-caption">
+        <span>one <code>.eap/</code> project root</span>
+        <span>one hook dispatcher</span>
+        <span>EAP-Lean shrinks the code the agent writes</span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section class="section container reveal" id="layers">
+  <span class="kicker">01 · The four disciplines</span>
+  <h2>One product. Four membranes.</h2>
+  <p class="lede">Every crossing is a cost to justify. Each layer sits at one boundary, is <strong>independently opt-out</strong>, and keeps a <strong>lossless escape hatch</strong> — open the real file, return the full blob, disable Signal. Full design: <a href="https://github.com/0point9bar/EAP/blob/main/docs/ARCHITECTURE.md" target="_blank" rel="noopener">docs/ARCHITECTURE.md</a>.</p>
+
+  <div class="layers">
+    <div class="layer">
+      <div class="layer-top"><h3>EAP-Signal</h3><span class="membrane">output · prose</span><span class="badge shipping">shipping</span></div>
+      <p>Verdict-first response style. Cuts filler, preamble, and hedging while keeping code, commands, errors, paths, and safety text byte-exact.</p>
+      <ul>
+        <li><strong>Six intensity levels</strong> — lite / full / ultra + three Classical-Chinese <em>wenyan</em> tiers</li>
+        <li><strong>Auto-Clarity</strong> — security warnings and irreversible actions get full sentences</li>
+        <li>Prompt-only; applies to any agent — the perfected TLDR prompt</li>
+      </ul>
+    </div>
+    <div class="layer">
+      <div class="layer-top"><h3>EAP-Lean</h3><span class="membrane">output · code</span><span class="badge shipping">shipping</span></div>
+      <p>Minimal-code craft: understand first, then walk a 7-rung ladder and stop at the first rung that holds.</p>
+      <ul>
+        <li><strong>YAGNI → reuse → stdlib → native → installed dep → one line → minimum</strong></li>
+        <li><strong>Hard safety carve-outs</strong> — validation, data-loss handling, security, accessibility, one runnable check per non-trivial path</li>
+        <li>Ships <code>eap-lean-review</code> / <code>-audit</code> / <code>-debt</code> skills</li>
+      </ul>
+    </div>
+    <div class="layer">
+      <div class="layer-top"><h3>EAP-Context</h3><span class="membrane">input · retrieval</span><span class="badge built">built · opt-in</span></div>
+      <p>A local code-symbol graph. The agent queries for the relevant subgraph and gets <code>file:line</code> pointers instead of dumping whole files.</p>
+      <ul>
+        <li><strong>10 languages</strong> — Python via stdlib <code>ast</code>; bounded regex extractors for JS/TS, Go, Rust, Java, C/C++, C#, Ruby, PHP</li>
+        <li><strong>Graph algorithms</strong> — shortest path, communities, centrality; fuzzy seeding; incremental per-file index</li>
+        <li>8 MCP tools · 52 Python tests · stdlib-only</li>
+      </ul>
+    </div>
+    <div class="layer">
+      <div class="layer-top"><h3>EAP-Runtime</h3><span class="membrane">working · tool output</span><span class="badge built">built · opt-in</span></div>
+      <p>"Think in code": run a script in a subprocess against raw data; only its printed summary re-enters context.</p>
+      <ul>
+        <li><strong>12 execution languages</strong> when host runtimes are present; 13 MCP tools</li>
+        <li><strong>Auto-offload</strong> — oversized output lands in a dual-tokenizer FTS index (RRF-fused) behind a searchable pointer</li>
+        <li>State snapshots survive compaction; the only network egress is the SSRF-hardened <code>eap_fetch</code></li>
+      </ul>
+    </div>
+  </div>
+  <div class="substrate">
+    <span>local &amp; deterministic</span>
+    <span>no LLM</span>
+    <span>no network</span>
+    <span>SessionStart / PreToolUse / PostToolUse / PreCompact</span>
+    <span>zero third-party code</span>
+  </div>
+</section>
+
+<section class="section container reveal" id="numbers">
+  <span class="kicker">02 · Honest numbers</span>
+  <h2>Reproducible or unpublished.</h2>
+  <p class="lede">EAP reprints <strong>none</strong> of its sources' 99%-class headlines — those are measured against strawman "dump every byte" baselines. Below is the committed bench: 6 fixed tasks over an 82&nbsp;KB committed corpus, EAP (<strong>B2</strong>) vs a competent grep-and-read agent (<strong>B1</strong>). Rerun it yourself: <code>python3 bench/run.py</code>.</p>
+
+  <div class="tiles">
+    <div class="tile"><div class="n"><em>−37.3%</em></div><div class="l">aggregate input tokens, B2 vs B1 (honest baseline)</div></div>
+    <div class="tile"><div class="n">6/6</div><div class="l">task success — every arm, every task</div></div>
+    <div class="tile"><div class="n">100%</div><div class="l">lossless retrieval — exact chunks + pointer, never summaries</div></div>
+    <div class="tile"><div class="n">0</div><div class="l">numbers published without a committed harness</div></div>
+  </div>
+
+  <div class="bench-wrap">
+    <table class="bench" aria-label="Per-task bench results: input tokens per arm and B2 versus B1 reduction">
+      <thead>
+        <tr><th>task</th><th>kind</th><th>B0 strawman*</th><th>B1 grep</th><th>B2 EAP</th><th>B2 vs B1</th><th>success</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>log-500-source</td><td class="kind">runtime-offload</td><td class="b0">20,568</td><td>6,044</td><td>1,066</td><td class="delta-pos">−82.4%</td><td class="ok">✓</td></tr>
+        <tr><td>log-scraper-ua</td><td class="kind">runtime-offload</td><td class="b0">20,568</td><td>3,786</td><td>1,580</td><td class="delta-pos">−58.3%</td><td class="ok">✓</td></tr>
+        <tr><td>log-slowest-flagged</td><td class="kind">runtime-offload</td><td class="b0">20,568</td><td>158</td><td>1,580</td><td class="delta-neg">grep wins ×10</td><td class="ok">✓</td></tr>
+        <tr><td>issues-security-assignee</td><td class="kind">runtime-offload</td><td class="b0">20,568</td><td>1,158</td><td>1,581</td><td class="delta-neg">grep wins +36%</td><td class="ok">✓</td></tr>
+        <tr><td>issues-open-regression</td><td class="kind">runtime-offload</td><td class="b0">20,568</td><td>1,243</td><td>1,581</td><td class="delta-neg">grep wins +27%</td><td class="ok">✓</td></tr>
+        <tr><td>code-fee-bps</td><td class="kind">context-retrieval</td><td class="b0">20,568</td><td>53</td><td>409</td><td class="delta-neg">grep wins ×7.7</td><td class="ok">✓</td></tr>
+      </tbody>
+      <tfoot>
+        <tr><td>AGGREGATE</td><td class="kind">6 tasks</td><td class="b0">123,408</td><td>12,442</td><td>7,797</td><td class="delta-pos">−37.3%</td><td class="ok">6/6</td></tr>
+      </tfoot>
+    </table>
+  </div>
+  <p class="bench-notes">* B0 (every corpus byte in context) is printed for context only and is <strong>never</strong> the denominator for any claim. Negative rows — where a rare-token grep beats EAP — are reported, not hidden. Tokens ≈ <code>ceil(chars/4)</code>, applied identically to all arms. Input membrane only: these figures are <strong>never multiplied</strong> with other layers' savings. Rules: <a href="https://github.com/0point9bar/EAP/blob/main/docs/EFFICIENCY.md" target="_blank" rel="noopener">docs/EFFICIENCY.md</a>.</p>
+
+  <div class="rules-grid">
+    <div><span class="no">rule 01</span><h3>Realistic baseline.</h3><p>The honest baseline is a competent grep-and-read agent — never the dump-everything strawman.</p></div>
+    <div><span class="no">rule 02</span><h3>Never multiplied.</h3><p>Per-layer savings are reported separately. No compounded headline exists anywhere in this repo.</p></div>
+    <div><span class="no">rule 03</span><h3>Task success is first-class.</h3><p>A configuration that saves tokens but lowers success is a regression, not a win.</p></div>
+    <div><span class="no">rule 04</span><h3>Lossy ≠ lossless.</h3><p>Summary retrieval and exact-chunk retrieval are never blended into one number; recall is reported.</p></div>
+    <div><span class="no">rule 05</span><h3>Full distribution.</h3><p>Every task row is printed — including the ones where grep beats EAP.</p></div>
+    <div><span class="no">rule 06</span><h3>Reproducible or unpublished.</h3><p>If <code>make bench</code> doesn't reproduce it, it doesn't appear anywhere.</p></div>
+  </div>
+</section>
+
+<section class="section container reveal" id="install">
+  <span class="kicker">03 · Install</span>
+  <h2>One line. Interactive TUI.</h2>
+  <p class="lede">The bootstrap checks git + Node ≥ 22, clones the repo, and launches a TUI that detects your installed agents and lets you pick which agents and which layers to wire — even through <code>curl | bash</code>. Zero third-party dependencies: Node built-ins only.</p>
+
+  <div class="tabs">
+    <div class="tab-row" role="tablist" aria-label="Install methods">
+      <button class="active" role="tab" aria-selected="true" onclick="setTab('t-sh', this)">macOS / Linux / WSL</button>
+      <button role="tab" aria-selected="false" onclick="setTab('t-ps', this)">Windows PowerShell</button>
+      <button role="tab" aria-selected="false" onclick="setTab('t-clone', this)">From a clone</button>
+    </div>
+    <div class="tab-panel active" id="t-sh" role="tabpanel">
+      <div class="cmd"><span class="prompt-char" aria-hidden="true">❯</span><code>curl -fsSL https://raw.githubusercontent.com/0point9bar/EAP/main/install.sh | bash</code><button class="copy-btn" data-copy="curl -fsSL https://raw.githubusercontent.com/0point9bar/EAP/main/install.sh | bash" aria-label="Copy bash install command">Copy</button></div>
+      <p class="note">Automation: append flags — <code>… | bash -s -- --only claude --non-interactive</code>. Uninstall cleanly with <code>node bin/eap-install.mjs --uninstall</code>.</p>
+    </div>
+    <div class="tab-panel" id="t-ps" role="tabpanel">
+      <div class="cmd"><span class="prompt-char" aria-hidden="true">❯</span><code>irm https://raw.githubusercontent.com/0point9bar/EAP/main/install.ps1 | iex</code><button class="copy-btn" data-copy="irm https://raw.githubusercontent.com/0point9bar/EAP/main/install.ps1 | iex" aria-label="Copy PowerShell install command">Copy</button></div>
+      <p class="note">Same bootstrap: checks git + Node ≥ 22, clones, launches the TUI.</p>
+    </div>
+    <div class="tab-panel" id="t-clone" role="tabpanel">
+      <pre>git clone https://github.com/0point9bar/EAP.git &amp;&amp; cd EAP
+node bin/eap-install.mjs                          # interactive TUI
+node bin/eap-install.mjs --list                   # provider matrix: end-to-end vs planned
+node bin/eap-install.mjs --dry-run --only claude  # print the full plan, write nothing
+node bin/eap-install.mjs --uninstall              # remove rules + MCP entries + hooks</pre>
+      <p class="note">Works on private clones. <code>--no-lean</code>, <code>--no-runtime</code>, <code>--no-context</code> skip individual layers.</p>
+    </div>
+  </div>
+
+  <div class="matrix">
+    <div class="matrix-card">
+      <h3>End-to-end</h3><span class="sub">rules + both MCP servers + hooks</span>
+      <p>Signal + Lean rules as managed fenced blocks, eap-runtime and eap-context MCP servers, and the hook dispatcher wired into settings.</p>
+      <div class="agents"><span>claude code</span></div>
+    </div>
+    <div class="matrix-card">
+      <h3>Native</h3><span class="sub">rules + both MCP servers</span>
+      <p>Signal + Lean rules and both EAP MCP servers registered via each agent's own CLI or config file. Pi gets rules only — it ships npm extensions, not MCP.</p>
+      <div class="agents"><span>codex</span><span>grok</span><span>hermes</span><span>cursor</span><span>antigravity</span><span>opencode</span><span>pi*</span></div>
+    </div>
+    <div class="matrix-card">
+      <h3>Planned — honestly</h3><span class="sub">detected + manual plan</span>
+      <p>Every other detected agent gets a printed per-agent manual plan. The installer never claims to have wired an agent it hasn't implemented. <code>--list</code> is the authoritative matrix.</p>
+      <div class="agents"><span>gemini</span><span>windsurf</span><span>cline</span><span>…</span></div>
+    </div>
+  </div>
+</section>
+
+<section class="section container reveal" id="security">
+  <span class="kicker">04 · Security posture</span>
+  <h2>A policy layer — not a sandbox.</h2>
+  <div class="sec-card">
+    <h3>Labeled honestly, built to fail closed.</h3>
+    <p>The Runtime executor is a subprocess with a policy deny-list — it blocks <code>curl</code>/<code>wget</code>/inline network fetches and redirects them to an indexed fetch. It is <strong>not</strong> OS-level isolation and inherits the host's credentials by design; real isolation (bwrap / landlock / containers) is an explicit later layer, not an implied guarantee. Within that policy layer:</p>
+    <ul>
+      <li><code>eap_execute_file</code> refuses to run any file it cannot scan (<code>policy-scan-failed</code>) rather than running it unscanned</li>
+      <li><code>eap_fetch</code> egress is scheme-allowlisted (http/https) and port-allowlisted (80/443 only)</li>
+      <li>URL credentials are stripped — no <code>Authorization: Basic</code> header is derived or leaked</li>
+      <li>Every rule re-applies on each redirect hop, alongside the SSRF IP guard</li>
+      <li>The clean-room contamination gate treats a scan <em>error</em> as a hard failure, never a silent pass</li>
+      <li>Every layer is opt-out; small outputs pass through verbatim</li>
+    </ul>
+  </div>
+</section>
+</main>
+
+<footer class="footer">
+  <div class="container">
+    <div class="footer-grid">
+      <div>
+        <div class="brand"><img src="assets/eap-mark.svg" alt=""> EAP</div>
+        <p>MIT, sole-maintained, self-contained — zero third-party code or dependencies. Signal descends from <a href="https://0point9bar.github.io/TLDR/">TLDR</a> ← caveman (MIT); Lean and Context are concept-derived from MIT projects (no code used); Runtime is a clean-room reimplementation. Full provenance in <a href="https://github.com/0point9bar/EAP/blob/main/docs/legal/ATTRIBUTION.md">ATTRIBUTION.md</a>.</p>
+      </div>
+      <div class="footer-col">
+        <h4>Project</h4>
+        <a href="https://github.com/0point9bar/EAP" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/0point9bar/EAP/issues" target="_blank" rel="noopener">Issues</a>
+        <a href="https://github.com/0point9bar/EAP/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
+        <a href="https://0point9bar.github.io/TLDR/">Sibling: TLDR</a>
+      </div>
+      <div class="footer-col">
+        <h4>Docs</h4>
+        <a href="https://github.com/0point9bar/EAP/blob/main/EAP.md" target="_blank" rel="noopener">The protocol (EAP.md)</a>
+        <a href="https://github.com/0point9bar/EAP/blob/main/docs/ARCHITECTURE.md" target="_blank" rel="noopener">Architecture</a>
+        <a href="https://github.com/0point9bar/EAP/blob/main/docs/EFFICIENCY.md" target="_blank" rel="noopener">Efficiency rules</a>
+      </div>
+      <div class="footer-col">
+        <h4>Proof</h4>
+        <a href="https://github.com/0point9bar/EAP/tree/main/bench" target="_blank" rel="noopener">The bench harness</a>
+        <a href="https://github.com/0point9bar/EAP/blob/main/docs/legal/ATTRIBUTION.md" target="_blank" rel="noopener">Attribution</a>
+        <a href="https://github.com/0point9bar/EAP/blob/main/NOTICE" target="_blank" rel="noopener">NOTICE</a>
+      </div>
+    </div>
+    <div class="footer-base">
+      <span>© 2026 <a href="https://github.com/0point9bar" target="_blank" rel="noopener">0point9bar</a> · MIT</span>
+      <span>No quantitative claim on this page exists without a committed, rerunnable harness behind it.</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+document.querySelectorAll('.copy-btn').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    navigator.clipboard.writeText(btn.getAttribute('data-copy')).then(function () {
+      var old = btn.textContent;
+      btn.textContent = 'Copied'; btn.classList.add('copied');
+      setTimeout(function () { btn.textContent = old; btn.classList.remove('copied'); }, 1600);
+    });
+  });
+});
+function setTab(id, btn) {
+  document.querySelectorAll('.tab-row button').forEach(function (b) { b.classList.remove('active'); b.setAttribute('aria-selected', 'false'); });
+  document.querySelectorAll('.tab-panel').forEach(function (p) { p.classList.remove('active'); });
+  btn.classList.add('active'); btn.setAttribute('aria-selected', 'true');
+  document.getElementById(id).classList.add('active');
+}
+var io = new IntersectionObserver(function (entries) {
+  entries.forEach(function (e) { if (e.isIntersecting) { e.target.classList.add('visible'); io.unobserve(e.target); } });
+}, { threshold: 0.12 });
+document.querySelectorAll('.reveal').forEach(function (el) { io.observe(el); });
+</script>
+</body>
+</html>

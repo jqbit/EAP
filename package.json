@@ -4,6 +4,14 @@
   "description": "EAP — Efficient Agent Protocol. Compress agent tokens at all three membranes: input (Context), working (Runtime), output (Signal). MIT, self-contained, honest claims.",
   "license": "MIT",
   "author": "ZeroPointNineBar",
+  "homepage": "https://0point9bar.github.io/EAP/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0point9bar/EAP.git"
+  },
+  "bugs": {
+    "url": "https://github.com/0point9bar/EAP/issues"
+  },
   "type": "module",
   "engines": { "node": ">=22" },
   "scripts": {

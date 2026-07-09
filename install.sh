@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # EAP — one-line installer for macOS, Linux, and Git Bash / WSL on Windows.
 #
-#   curl -fsSL https://raw.githubusercontent.com/ZeroPointNineBar/EAP/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/0point9bar/EAP/main/install.sh | bash
 #
 # Pass installer flags after `-s --`, e.g. install only Claude Code:
-#   curl -fsSL https://raw.githubusercontent.com/ZeroPointNineBar/EAP/main/install.sh | bash -s -- --only claude
+#   curl -fsSL https://raw.githubusercontent.com/0point9bar/EAP/main/install.sh | bash -s -- --only claude
 #
 # Env overrides: EAP_HOME (checkout dir, default ~/.eap-src), EAP_REPO
 # (owner/repo), EAP_BRANCH (default main), EAP_NONINTERACTIVE=1 (skip the TUI).
@@ -14,7 +14,7 @@
 # from /dev/tty so it works even through `curl | bash`), or takes flags in CI.
 set -euo pipefail
 
-REPO="${EAP_REPO:-ZeroPointNineBar/EAP}"
+REPO="${EAP_REPO:-0point9bar/EAP}"
 BRANCH="${EAP_BRANCH:-main}"
 EAP_HOME="${EAP_HOME:-$HOME/.eap-src}"
 
