@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync, mkdirSync, symlinkSync, lstatSync } from 'node:fs';
+import { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync, mkdirSync, symlinkSync, lstatSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -487,6 +487,25 @@ for (const [id, flavor] of Object.entries(CLI_MCP_AGENTS)) {
     } finally { rmSync(home, { recursive: true, force: true }); }
   });
 }
+
+test('native MCP (hermes): reinstall feeds confirmation for overwrite and tool enable prompts', () => {
+  const home = mkTmp('mcp-cli-hermes-reinstall');
+  const env = sandboxEnv(home);
+  const binDir = join(home, 'bin');
+  const logBase = join(home, 'hermes-stdin');
+  try {
+    mkdirSync(binDir, { recursive: true });
+    const fakeHermes = join(binDir, 'hermes');
+    writeFileSync(fakeHermes, `#!/bin/sh\ncat > "${logBase}.$3"\n`);
+    chmodSync(fakeHermes, 0o755);
+    env.PATH = `${binDir}:/usr/bin:/bin`;
+
+    const r = run(['--only', 'hermes', '--non-interactive', '--no-color'], { env });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readFileSync(`${logBase}.eap-runtime`, 'utf8'), 'y\ny\n');
+    assert.equal(readFileSync(`${logBase}.eap-context`, 'utf8'), 'y\ny\n');
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
 
 test('--only accepts a comma-separated list (codex,opencode) without exiting 2', () => {
   const home = mkTmp('mcp-comma');

@@ -2,6 +2,9 @@
 // Run: node --test tests/runtime-store.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
   RuntimeStore, chunk, OFFLOAD_THRESHOLD_BYTES, probeSqlite, tokenize, STOPWORDS,
 } from '../layers/eap-runtime/src/store.mjs';
@@ -171,4 +174,25 @@ test('tokenize/STOPWORDS helpers are Unicode-aware and expose the stopword set',
   assert.deepEqual(tokenize('Foo_Bar baz-qux 42'), ['foo_bar', 'baz', 'qux', '42']);
   assert.ok(STOPWORDS.has('the'));
   assert.ok(!STOPWORDS.has('timeout'));
+});
+
+test('file-backed store enables WAL + busy_timeout so concurrent multi-agent opens do not hard-fail', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'eap-store-wal-'));
+  const dbPath = join(dir, 'runtime.db');
+  const a = new RuntimeStore(dbPath);
+  const b = new RuntimeStore(dbPath);
+  try {
+    const mode = a.db.prepare('PRAGMA journal_mode').get().journal_mode;
+    const timeout = a.db.prepare('PRAGMA busy_timeout').get().timeout;
+    assert.equal(String(mode).toLowerCase(), 'wal');
+    assert.equal(timeout, 5000);
+    a.index('src-a', 'alpha concurrent payload');
+    b.index('src-b', 'beta concurrent payload');
+    assert.ok(a.search('alpha').length >= 1);
+    assert.ok(b.search('beta').length >= 1);
+  } finally {
+    a.close();
+    b.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

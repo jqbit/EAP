@@ -83,11 +83,12 @@ export function probeSqlite() {
   return report;
 }
 
-export class RuntimeStore {
-  // dbPath: ':memory:' for tests, or an absolute path under .eap/ in production.
-  constructor(dbPath = ':memory:') {
-    this.db = new DatabaseSync(dbPath);
-    this.db.exec(`
+// Open (or create) the on-disk store under multi-agent contention.
+// WAL + busy_timeout handle steady-state sharing; a short open retry covers the
+// cold-start CREATE race when many CLIs hit a brand-new runtime.db together.
+// eap-lean: fixed 8 attempts / 5s busy — upgrade path: longer if lock storms rise
+function openRuntimeDb(dbPath) {
+  const schema = `
       CREATE TABLE IF NOT EXISTS docs (
         id TEXT PRIMARY KEY,
         source TEXT NOT NULL,
@@ -103,7 +104,35 @@ export class RuntimeStore {
         doc_id UNINDEXED, idx UNINDEXED, body,
         tokenize = 'trigram'
       );
-    `);
+    `;
+  const attempts = dbPath === ':memory:' ? 1 : 8;
+  let last;
+  for (let i = 0; i < attempts; i++) {
+    let db;
+    try {
+      db = new DatabaseSync(dbPath);
+      if (dbPath !== ':memory:') {
+        db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;');
+      }
+      db.exec(schema);
+      return db;
+    } catch (err) {
+      last = err;
+      try { db?.close(); } catch { /* ignore close races */ }
+      const msg = String(err?.message || err);
+      const busy = /database is locked|SQLITE_BUSY|errcode:\s*5/i.test(msg);
+      if (!busy || i === attempts - 1) throw err;
+      // Sleep without timers: multi-agent open storms are short.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20 * (i + 1));
+    }
+  }
+  throw last;
+}
+
+export class RuntimeStore {
+  // dbPath: ':memory:' for tests, or an absolute path under .eap/ in production.
+  constructor(dbPath = ':memory:') {
+    this.db = openRuntimeDb(dbPath);
   }
 
   // Deterministic id from the source label + content hash (no clock, no random),
