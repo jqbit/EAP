@@ -75,6 +75,30 @@ test('--dry-run --only claude writes NOTHING and plans Signal + both MCP + hooks
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('Claude reinstall refreshes stale EAP dispatcher paths instead of keeping another checkout', () => {
+  const dir = mkTmp('hook-path-refresh');
+  try {
+    const stale = '/old/checkout/EAP/src/hooks/eap-dispatch.mjs';
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify({
+      hooks: {
+        UserPromptSubmit: [{ hooks: [{
+          type: 'command',
+          command: `"node" "${stale}" UserPromptSubmit "${join(dir, '.eap.json')}"`,
+          timeout: 5,
+        }] }],
+      },
+    }, null, 2));
+
+    const r = run(['--only', 'claude', '--config-dir', dir, '--non-interactive', '--no-color']);
+    assert.equal(r.status, 0, r.stderr);
+    const settings = readFileSync(join(dir, 'settings.json'), 'utf8');
+    assert.doesNotMatch(settings, /\/old\/checkout\/EAP/);
+    assert.match(settings, /eap-dispatch\.mjs/);
+    assert.equal((settings.match(/eap-dispatch\.mjs/g) || []).length, 6,
+      'one current dispatcher hook per lifecycle event');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('real --only claude install lands Signal block + both MCP entries + hooks, then uninstall reverses it while preserving user content', () => {
   const dir = mkTmp('inst');
   try {

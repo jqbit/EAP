@@ -191,7 +191,22 @@ export function addCommandHook(settings, event, opts) {
   if (!isPlainObject(settings.hooks)) settings.hooks = {};
   if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
   const marker = opts.marker || opts.command;
-  if (hasCommandHook(settings, event, marker)) return false;
+  for (const entry of settings.hooks[event]) {
+    if (!entry || !Array.isArray(entry.hooks)) continue;
+    const hook = entry.hooks.find((h) =>
+      h && typeof h.command === 'string' && h.command.includes(marker));
+    if (!hook) continue;
+    // Reinstalls may run from a moved/updated checkout. Refresh the managed
+    // command in place instead of treating any marker match as permanently
+    // current; otherwise hooks keep executing an old checkout forever.
+    hook.type = 'command';
+    hook.command = opts.command;
+    if (typeof opts.timeout === 'number') hook.timeout = opts.timeout;
+    else delete hook.timeout;
+    if (typeof opts.matcher === 'string' && opts.matcher) entry.matcher = opts.matcher;
+    else delete entry.matcher;
+    return false;
+  }
   const hook = { type: 'command', command: opts.command };
   if (typeof opts.timeout === 'number') hook.timeout = opts.timeout;
   const entry = { hooks: [hook] };
