@@ -1,10 +1,11 @@
 ---
 name: eap-lean-help
 description: >
-  Quick-reference card for EAP-Lean: the levels (lite/full/ultra/off), the five
-  tooling skills, the switch syntax, and how to deactivate. One-shot display,
-  not a persistent mode. Use when the user says "lean help", "what lean
-  commands", "how do I use eap-lean", or runs /eap-lean-help.
+  Quick-reference card for EAP-Lean: the levels (lite/full/ultra/off), the six
+  skills (mode + tooling), the switch syntax, defaults env/config, and how to
+  deactivate. One-shot display, not a persistent mode. Use when the user says
+  "lean help", "what lean commands", "how do I use eap-lean", or runs
+  /eap-lean-help.
 license: MIT
 ---
 
@@ -29,14 +30,26 @@ the rules file); `--no-lean` at install time opts out while keeping EAP-Signal.
 
 | Skill | Trigger | What it does |
 |-------|---------|--------------|
+| **eap-lean** | `/eap lean …` | Mode switch for skill-only hosts (`lite\|full\|ultra\|off`). |
 | **eap-lean-review** | `/eap-lean-review` | Over-engineering review of a diff → tagged delete-list (`delete`/`stdlib`/`native`/`yagni`/`shrink`) + `net: -N lines possible`. |
 | **eap-lean-audit** | `/eap-lean-audit` | Same lens repo-wide, ranked biggest cut first. |
 | **eap-lean-debt** | `/eap-lean-debt` | Harvest `eap-lean:` shortcut comments into a tracked ledger. |
 | **eap-lean-gain** | `/eap-lean-gain` | Measured-only scoreboard: marker count + this session's net figures. No benchmark claims. |
 | **eap-lean-help** | `/eap-lean-help` | This card. |
 
-All five read and report only — they never apply fixes. Correctness, security,
-and performance bugs are out of their scope; route those to a normal review.
+Tooling skills (review/audit/debt/gain/help) read and report only. Correctness,
+security, and performance bugs are out of their scope; route those to a normal review.
+
+## Defaults
+
+```bash
+export EAP_LEAN_DEFAULT_MODE=ultra   # off|lite|full|ultra
+# or ~/.config/eap/config.json → {"leanDefaultMode":"ultra"}  (Windows: %APPDATA%\eap\)
+# or /eap lean default ultra
+```
+
+Subagent inject scoping: `EAP_SUBAGENT_MATCHER` / `EAP_LEAN_SUBAGENT_MATCHER`
+(regex on `agent_type`).
 
 ## The peer layer
 

@@ -37,28 +37,26 @@ lazier alternative, user picks), **full** (ladder enforced; the default), and
 <level>`, mirrors `/eap signal <level>` so the two always-on disciplines share
 one muscle-memory.
 
-## Concept derivation from ponytail (no code taken)
+## Concept derivation from ponytail (MIT ports + clean hooks)
 
-EAP-Lean is **concept-derived** from ponytail by Dietrich Gebert
-(https://github.com/DietrichGebert/ponytail, MIT). What EAP borrows is the
-*idea* and *shape* of a code-brevity discipline:
+EAP-Lean is **derived** from ponytail by Dietrich Gebert
+(https://github.com/DietrichGebert/ponytail, MIT). What EAP takes:
 
 - the "lazy senior dev" framing and the rung order of the ladder,
 - the review tag vocabulary (`delete`/`stdlib`/`native`/`yagni`/`shrink`),
 - the `net: -N lines` scoring of a review,
-- the marker-comment-for-deliberate-simplification convention, and
-- the specific safety carve-outs (validation, data loss, security,
-  accessibility, calibration, the one-runnable-check rule).
+- the marker-comment-for-deliberate-simplification convention (`ponytail:` → `eap-lean:`),
+- the specific safety carve-outs,
+- **documentation / examples / bench ports** under `examples/` and `bench/`
+  (promptfoo configs, agentic harness scaffolding, `generate-examples.mjs`,
+  platform-native + agent-portability docs).
 
-EAP-Lean's rule text, tag vocabulary, scoring strings, and worked examples are
-close adaptations of ponytail's documentation (some sentences verbatim) — a
-documentation derivative, not a clean room. What EAP does **not** take is
-ponytail's *runtime*: the hooks, mode tracker, flag file, and MCP server are
-reimplemented independently, and the marker is renamed `ponytail:` → `eap-lean:`
-with EAP's own `/eap lean` switch verb. ponytail is MIT; its copyright and
-permission notice is retained in `docs/legal/THIRD_PARTY_NOTICES.md`. (The
-genuine clean room is EAP-Runtime toward the ELv2 context-mode pattern — credit
-for the concept, zero source read; see ATTRIBUTION.md.)
+What EAP does **not** vendor is ponytail's *hook runtime* — mode flags, default
+config resolution, SubagentStart matcher, statusline, and dispatch live under
+`src/hooks/` as an independent reimplementation with EAP naming
+(`EAP_LEAN_DEFAULT_MODE`, `EAP_SUBAGENT_MATCHER`, …). ponytail's MIT notice is
+retained in `docs/legal/THIRD_PARTY_NOTICES.md`. (The genuine clean room remains
+EAP-Runtime toward ELv2 context-mode — see ATTRIBUTION.md.)
 
 ## How it composes
 

@@ -1,0 +1,2 @@
+description = "EAP-Signal terse commit message"
+prompt = "Generate an EAP-Signal commit message for the current staged changes. Conventional Commits. Subject ≤50 chars, imperative. Body only when why is not obvious."

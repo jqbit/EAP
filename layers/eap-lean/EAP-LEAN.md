@@ -43,6 +43,14 @@ callers broken.
 Switch: `/eap lean lite|full|ultra|off` (where supported). Level persists until
 changed. "stop lean" / "normal mode" also reverts.
 
+New-session default (no session flag): `EAP_LEAN_DEFAULT_MODE` env, else
+`leanDefaultMode` / `defaultMode` in `~/.config/eap/config.json` or project
+`.eap/config.json` (Windows: `%APPDATA%\eap\config.json`), else **full**.
+Persist with `/eap lean default <mode>` when hooks are installed.
+
+Platform-native catalog (Native rung): `docs/platform-native.md`. Host matrix:
+`docs/agent-portability.md`.
+
 ## Persistence
 ACTIVE EVERY RESPONSE. No drift back to over-building or speculative structure.
 Still active if unsure. Off only: "stop lean" / "normal mode".

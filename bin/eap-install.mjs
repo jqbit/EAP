@@ -31,6 +31,7 @@ import {
   addCommandHook, removeCommandHooks,
   upsertFencedBlock, stripFencedBlock, atomicWrite, isPlainObject,
 } from './lib/settings.mjs';
+import { writeInstallState } from './lib/update.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,11 +44,24 @@ const CONTEXT_MCP = path.join(REPO_ROOT, 'layers', 'eap-context', 'src', 'eap_co
 const SIGNAL_RULE = path.join(REPO_ROOT, 'layers', 'eap-signal', 'EAP-SIGNAL.md');
 const LEAN_RULE = path.join(REPO_ROOT, 'layers', 'eap-lean', 'EAP-LEAN.md');
 const LEAN_SKILLS_SRC = path.join(REPO_ROOT, 'layers', 'eap-lean', 'skills');
-const LEAN_SKILLS = ['eap-lean-review', 'eap-lean-audit', 'eap-lean-debt', 'eap-lean-gain', 'eap-lean-help'];
+const LEAN_SKILLS = ['eap-lean', 'eap-lean-review', 'eap-lean-audit', 'eap-lean-debt', 'eap-lean-gain', 'eap-lean-help'];
 const RUNTIME_SKILLS_SRC = path.join(REPO_ROOT, 'layers', 'eap-runtime', 'skills');
-const RUNTIME_SKILLS = ['eap-stats', 'eap-search', 'eap-doctor', 'eap-purge'];
+const RUNTIME_SKILLS = [
+  'eap-stats', 'eap-search', 'eap-doctor', 'eap-purge',
+  'eap-runtime', 'eap-index', 'eap-upgrade', 'eap-update',
+];
+const SIGNAL_SKILLS_SRC = path.join(REPO_ROOT, 'layers', 'eap-signal', 'skills');
+const SIGNAL_SKILLS = [
+  'eap-signal', 'eap-signal-commit', 'eap-signal-review', 'eap-signal-stats',
+  'eap-signal-compress', 'eap-signal-help', 'eapcrew',
+];
+const SIGNAL_AGENTS_SRC = path.join(REPO_ROOT, 'layers', 'eap-signal', 'agents');
+const SIGNAL_AGENTS = ['eapcrew-investigator.md', 'eapcrew-builder.md', 'eapcrew-reviewer.md'];
+const SIGNAL_COMMANDS_SRC = path.join(REPO_ROOT, 'layers', 'eap-signal', 'commands');
+const SIGNAL_SHRINK = path.join(REPO_ROOT, 'layers', 'eap-signal', 'mcp-servers', 'eap-signal-shrink', 'index.mjs');
 const HOOK_DISPATCH = path.join(REPO_ROOT, 'src', 'hooks', 'eap-dispatch.mjs');
 const STATUSLINE = path.join(REPO_ROOT, 'src', 'hooks', 'eap-statusline.mjs');
+const STATUSLINE_PS1 = path.join(REPO_ROOT, 'src', 'hooks', 'eap-statusline.ps1');
 
 // Managed-block markers (Signal rule) and the hook idempotency marker.
 const SIGNAL_BEGIN = '<!-- eap-signal:begin -->';
@@ -87,52 +101,96 @@ function stripEapBlocks(body) {
 const HOOK_MARKER = 'eap-dispatch';
 
 // Claude Code hook events EAP wires (see src/hooks/eap-dispatch.mjs).
+// SubagentStart injects Signal+Lean into Task-spawned agents (parent SessionStart
+// context does not reach them — ponytail #252).
 const HOOK_EVENTS = [
   { event: 'SessionStart', matcher: null, timeout: 10 },
   { event: 'UserPromptSubmit', matcher: null, timeout: 5 },
+  { event: 'SubagentStart', matcher: null, timeout: 10 },
   { event: 'PreToolUse', matcher: 'Read|Grep|Glob', timeout: 5 },
   { event: 'PostToolUse', matcher: null, timeout: 10 },
   { event: 'PreCompact', matcher: null, timeout: 10 },
   { event: 'Stop', matcher: null, timeout: 5 },
 ];
 
+// PowerShell companion for Claude Code's commandWindows field. Paths are
+// single-quoted (PS literal); doubled singles escape. Never use cmd %VAR%.
+function psCommandWindows(node, script, ...args) {
+  const q = (p) => `'${String(p).replace(/'/g, "''")}'`;
+  const rest = args.map(q).join(' ');
+  return `if (Get-Command node -ErrorAction SilentlyContinue) { & ${q(node)} ${q(script)}${rest ? ' ' + rest : ''} }`;
+}
+
 // ── Provider roster ─────────────────────────────────────────────────────────
 // The id/label/detect matrix mirrored from the TLDR installer, reused as the
-// EAP roster (37 rows). `wired: true` marks a provider EAP installs END-TO-END
-// today (all three layers). A `native` field marks a provider that gets its
-// EAP-Signal rule written natively into its global always-on rules file
-// (`native.signal`), even though its MCP layers are not yet wired — reported as
-// "signal", never "end-to-end". `native.signal: null` means the agent has no
-// global rules file (per-repo only, e.g. cursor). Every remaining row is
-// detected and reported as "planned" — no false claims.
+// EAP roster (37 rows). `wired: true` = end-to-end (Claude). `native` = Signal+Lean
+// rules (and optional skills/commands/MCP) written natively — reported as
+// "signal + lean[+mcp]", never "end-to-end".
 //
-// `native.signal` sentinels resolved by resolveNativeSignal(): `$HOME` (home dir),
-// `$XDG_CONFIG_HOME` (env or ~/.config), `$HERMES_HOME` (env or ~/.hermes).
+// native fields:
+//   signal       — always-on rules file ($HOME / $XDG_CONFIG_HOME / $HERMES_HOME)
+//   frontmatter  — optional IDE header prepended on first create (cursor/windsurf)
+//   skills       — skills root dir (Signal+Lean SKILL.md trees copied here)
+//   commands     — slash-command dir (opencode)
+//   agents       — eapcrew agent defs (opencode)
+//   mcp          — Runtime/Context MCP registration (see installMcpNative)
+//   kind         — 'gemini-ext' uses `gemini extensions install` (local layer path)
 //
-// `native.mcp` (present only on MCP-capable native agents) describes HOW to
-// register the two EAP MCP servers for that agent (installMcpNative):
-//   kind: 'cli-dashdash'  -> `<bin> mcp add <name> -- <command> <args…>`   (codex, grok)
-//   kind: 'cli-hermes'    -> `<bin> mcp add <name> --command <command> --args <args…>` (hermes)
-//   kind: 'json'          -> merge into a JSON/JSONC file at `file` under key `key`;
-//                            shape 'command-args'         -> { command, args }  (cursor, antigravity)
-//                            shape 'command-array-local'  -> { type:'local', command:[cmd,…args], enabled:true } (opencode)
-// pi has NO native.mcp — Pi ships npm extensions, not MCP, so it stays Signal-only.
+// Copilot stays planned: no stable global instructions path (per-repo
+// .github/copilot-instructions.md or marketplace skills CLI only).
 const PROVIDERS = [
   { id: 'claude',     label: 'Claude Code',        detect: 'command:claude', wired: true },
-  { id: 'gemini',     label: 'Gemini CLI',         detect: 'command:gemini' },
-  { id: 'opencode',   label: 'opencode',           detect: 'command:opencode', native: { signal: '$XDG_CONFIG_HOME/opencode/AGENTS.md', mcp: { kind: 'json', file: '$XDG_CONFIG_HOME/opencode/opencode.jsonc', key: 'mcp', shape: 'command-array-local' } } },
+  { id: 'gemini',     label: 'Gemini CLI',         detect: 'command:gemini', native: { kind: 'gemini-ext' } },
+  { id: 'opencode',   label: 'opencode',           detect: 'command:opencode', native: {
+      signal: '$XDG_CONFIG_HOME/opencode/AGENTS.md',
+      skills: '$XDG_CONFIG_HOME/opencode/skills',
+      commands: '$XDG_CONFIG_HOME/opencode/commands',
+      agents: '$XDG_CONFIG_HOME/opencode/agents',
+      mcp: { kind: 'json', file: '$XDG_CONFIG_HOME/opencode/opencode.jsonc', key: 'mcp', shape: 'command-array-local' },
+    } },
   { id: 'openclaw',   label: 'OpenClaw',           detect: 'command:openclaw||dir:$HOME/.openclaw/workspace' },
-  { id: 'hermes',     label: 'Hermes Agent',       detect: 'command:hermes', native: { signal: '$HERMES_HOME/SOUL.md', mcp: { kind: 'cli-hermes', bin: 'hermes' } } },
-  { id: 'codex',      label: 'Codex CLI',          detect: 'command:codex', native: { signal: '$HOME/.codex/AGENTS.md', mcp: { kind: 'cli-dashdash', bin: 'codex' } } },
-  { id: 'pi',         label: 'Pi Coding Agent',    detect: 'command:pi', native: { signal: '$HOME/.pi/agent/AGENTS.md' } },
-  { id: 'grok',       label: 'Grok Build CLI',     detect: 'command:grok', native: { signal: '$HOME/.grok/AGENTS.md', mcp: { kind: 'cli-dashdash', bin: 'grok' } } },
-  { id: 'cursor',     label: 'Cursor',             detect: 'command:cursor||macapp:Cursor', native: { signal: null, mcp: { kind: 'json', file: '$HOME/.cursor/mcp.json', key: 'mcpServers', shape: 'command-args' } } },
-  { id: 'windsurf',   label: 'Windsurf',           detect: 'command:windsurf||macapp:Windsurf' },
-  { id: 'cline',      label: 'Cline',              detect: 'vscode-ext:cline' },
+  { id: 'hermes',     label: 'Hermes Agent',       detect: 'command:hermes', native: {
+      signal: '$HERMES_HOME/SOUL.md',
+      skills: '$HERMES_HOME/skills/productivity',
+      mcp: { kind: 'cli-hermes', bin: 'hermes' },
+    } },
+  { id: 'codex',      label: 'Codex CLI',          detect: 'command:codex', native: {
+      signal: '$HOME/.codex/AGENTS.md',
+      skills: '$HOME/.codex/skills',
+      mcp: { kind: 'cli-dashdash', bin: 'codex' },
+    } },
+  { id: 'pi',         label: 'Pi Coding Agent',    detect: 'command:pi', native: {
+      signal: '$HOME/.pi/agent/AGENTS.md',
+      skills: '$HOME/.pi/agent/skills',
+    } },
+  { id: 'grok',       label: 'Grok Build CLI',     detect: 'command:grok', native: {
+      signal: '$HOME/.grok/AGENTS.md',
+      skills: '$HOME/.grok/skills',
+      mcp: { kind: 'cli-dashdash', bin: 'grok' },
+    } },
+  { id: 'cursor',     label: 'Cursor',             detect: 'command:cursor||macapp:Cursor', native: {
+      signal: '$HOME/.cursor/rules/eap.mdc',
+      frontmatter: '---\ndescription: "EAP — Signal (verdict-first) + Lean (minimal-code)"\nalwaysApply: true\n---\n\n',
+      skills: '$HOME/.cursor/skills',
+      mcp: { kind: 'json', file: '$HOME/.cursor/mcp.json', key: 'mcpServers', shape: 'command-args' },
+    } },
+  { id: 'windsurf',   label: 'Windsurf',           detect: 'command:windsurf||macapp:Windsurf', native: {
+      signal: '$HOME/.windsurf/rules/eap.md',
+      frontmatter: '---\ntrigger: always_on\n---\n\n',
+      skills: '$HOME/.windsurf/skills',
+    } },
+  { id: 'cline',      label: 'Cline',              detect: 'vscode-ext:cline', native: {
+      // Rules only: Cline global skills go through `npx skills add` marketplace
+      // profiles — no stable MIT-compatible skills dir to copy into.
+      signal: '$HOME/Documents/Cline/Rules/eap.md',
+    } },
+  // planned: marketplace `npx skills add` profile IDs (continue/kilo/roo/augment).
   { id: 'continue',   label: 'Continue',           detect: 'vscode-ext:continue.continue||vscode-ext:continue' },
   { id: 'kilo',       label: 'Kilo Code',          detect: 'vscode-ext:kilocode' },
   { id: 'roo',        label: 'Roo Code',           detect: 'vscode-ext:roo||vscode-ext:rooveterinaryinc.roo-cline||cursor-ext:roo' },
   { id: 'augment',    label: 'Augment Code',       detect: 'vscode-ext:augment||jetbrains-plugin:augment' },
+  // planned: no stable global instructions file (per-repo .github/copilot-instructions.md
+  // or marketplace `npx skills add` only — no global adapter we can ship).
   { id: 'copilot',    label: 'GitHub Copilot',     detect: 'command:copilot', soft: true },
   { id: 'aider-desk', label: 'Aider Desk',         detect: 'command:aider' },
   { id: 'amp',        label: 'Sourcegraph Amp',    detect: 'command:amp' },
@@ -154,7 +212,11 @@ const PROVIDERS = [
   { id: 'replit',     label: 'Replit Agent',       detect: 'command:replit' },
   { id: 'junie',      label: 'JetBrains Junie',    detect: 'jetbrains-plugin:junie', soft: true },
   { id: 'qoder',      label: 'Qoder',              detect: 'dir:$HOME/.qoder', soft: true },
-  { id: 'antigravity',label: 'Google Antigravity', detect: 'dir:$HOME/.gemini/antigravity', soft: true, native: { signal: '$HOME/.gemini/config/AGENTS.md', mcp: { kind: 'json', file: '$HOME/.gemini/config/mcp_config.json', key: 'mcpServers', shape: 'command-args' } } },
+  { id: 'antigravity',label: 'Google Antigravity', detect: 'command:agy||dir:$HOME/.gemini/antigravity', soft: true, native: {
+      signal: '$HOME/.gemini/config/AGENTS.md',
+      skills: '$HOME/.gemini/config/skills',
+      mcp: { kind: 'json', file: '$HOME/.gemini/config/mcp_config.json', key: 'mcpServers', shape: 'command-args' },
+    } },
 ];
 
 // ── argv ────────────────────────────────────────────────────────────────────
@@ -163,6 +225,7 @@ function parseArgs(argv) {
     help: false, listOnly: false, dryRun: false, uninstall: false,
     nonInteractive: false, noColor: false, force: false,
     runtime: true, context: true, lean: true, tui: false, yes: false,
+    withMcpShrink: null, // null=off; string=upstream argv string after --with-mcp-shrink=
     only: [], configDir: null,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -180,6 +243,7 @@ function parseArgs(argv) {
       case '--no-lean': opts.lean = false; break;
       case '--tui': opts.tui = true; break;
       case '-y': case '--yes': opts.yes = true; break;
+      case '--no-mcp-shrink': opts.withMcpShrink = null; break;
       case '--': break;
       case '--only': {
         const v = argv[++i];
@@ -199,7 +263,18 @@ function parseArgs(argv) {
         opts.configDir = expandHome(v);
         break;
       }
-      default: die(`error: unknown flag: ${a}\nrun 'eap-install --help' for usage`);
+      default: {
+        // --with-mcp-shrink="<upstream cmd…>" or --with-mcp-shrink <upstream>
+        if (a === '--with-mcp-shrink' || a.startsWith('--with-mcp-shrink=')) {
+          let v = a.includes('=') ? a.slice('--with-mcp-shrink='.length) : argv[++i];
+          if (!v || v.startsWith('--')) die('error: --with-mcp-shrink requires an upstream command');
+          // Strip surrounding quotes from shell forms.
+          if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+          opts.withMcpShrink = v.trim();
+          break;
+        }
+        die(`error: unknown flag: ${a}\nrun 'eap-install --help' for usage`);
+      }
     }
   }
   if (opts.only.length) {
@@ -339,9 +414,14 @@ function buildLeanBody(warn) {
 // independently and idempotently. A null body for a discipline skips it. Returns
 // null on success or the error message on failure (via tryWrite), so a read-only
 // rules dir records a clean per-agent failure instead of aborting the whole run.
-function writeRulesBlocks(file, signalBody, leanBody) {
+function writeRulesBlocks(file, signalBody, leanBody, frontmatter) {
   return tryWrite(() => {
     let body = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+    if (body == null) body = frontmatter || '';
+    else if (frontmatter && !body.startsWith('---') && !body.includes(SIGNAL_BEGIN) && !body.includes(LEAN_BEGIN)) {
+      // Prepend IDE frontmatter only when the file has neither our markers nor YAML.
+      body = frontmatter + body;
+    }
     if (signalBody != null) body = upsertFencedBlock(body, SIGNAL_BEGIN, SIGNAL_END, signalBody);
     if (leanBody != null) body = upsertFencedBlock(body, LEAN_BEGIN, LEAN_END, leanBody);
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -370,29 +450,142 @@ function resolveSentinelPath(spec) {
 }
 
 // Resolve a provider's native EAP-Signal rules-file path. Returns null when the
-// provider has no global rules file (native.signal === null, e.g. cursor).
+// provider has no rules file (gemini-ext, or signal omitted).
 function resolveNativeSignal(prov) {
   const spec = prov.native && prov.native.signal;
-  if (!spec) return null; // null (per-repo only) or no native signal at all
+  if (!spec) return null;
   return resolveSentinelPath(spec);
 }
 
-// ── Claude Code install (END-TO-END) ────────────────────────────────────────
-// Copy a layer's skills into <configDir>/skills/ so they are discoverable to
-// the agent. Prompt-only markdown; symlink-safe atomic write. Returns an error
-// string on failure, null on success/dry-run.
-function installSkills(configDir, opts, srcRoot, names) {
+// Copy SKILL.md trees into <skillsRoot>/<name>/. skillsRoot IS the skills
+// directory (e.g. ~/.codex/skills or ~/.hermes/skills/productivity).
+function installSkillsInto(skillsRoot, opts, srcRoot, names) {
   try {
     for (const name of names) {
-      const src = path.join(srcRoot, name, 'SKILL.md');
+      const srcDir = path.join(srcRoot, name);
+      const src = path.join(srcDir, 'SKILL.md');
       if (!fs.existsSync(src)) continue;
-      const destDir = path.join(configDir, 'skills', name);
+      const destDir = path.join(skillsRoot, name);
       if (opts.dryRun) continue;
       fs.mkdirSync(destDir, { recursive: true });
       atomicWrite(path.join(destDir, 'SKILL.md'), fs.readFileSync(src, 'utf8'), 0o644);
+      const sec = path.join(srcDir, 'SECURITY.md');
+      if (fs.existsSync(sec)) {
+        atomicWrite(path.join(destDir, 'SECURITY.md'), fs.readFileSync(sec, 'utf8'), 0o644);
+      }
+      for (const sub of ['references', 'scripts']) {
+        const subSrc = path.join(srcDir, sub);
+        if (!fs.existsSync(subSrc) || !fs.statSync(subSrc).isDirectory()) continue;
+        copyDirRecursive(subSrc, path.join(destDir, sub));
+      }
     }
     return null;
   } catch (e) { return e.message; }
+}
+
+function installSkills(configDir, opts, srcRoot, names) {
+  return installSkillsInto(path.join(configDir, 'skills'), opts, srcRoot, names);
+}
+
+function copyDirRecursive(src, dest) {
+  fs.mkdirSync(dest, { recursive: true });
+  for (const ent of fs.readdirSync(src, { withFileTypes: true })) {
+    const s = path.join(src, ent.name);
+    const d = path.join(dest, ent.name);
+    if (ent.isDirectory()) copyDirRecursive(s, d);
+    else if (ent.isFile()) {
+      const buf = fs.readFileSync(s);
+      // Strip accidental NUL bytes from copied sources.
+      const text = buf.includes(0) ? buf.filter((b) => b !== 0).toString('utf8') : buf.toString('utf8');
+      atomicWrite(d, text, 0o644);
+    }
+  }
+}
+
+function installAgentsInto(destDir, opts) {
+  try {
+    if (!fs.existsSync(SIGNAL_AGENTS_SRC)) return null;
+    if (opts.dryRun) return null;
+    fs.mkdirSync(destDir, { recursive: true });
+    for (const name of SIGNAL_AGENTS) {
+      const src = path.join(SIGNAL_AGENTS_SRC, name);
+      if (!fs.existsSync(src)) continue;
+      atomicWrite(path.join(destDir, name), fs.readFileSync(src, 'utf8'), 0o644);
+    }
+    return null;
+  } catch (e) { return e.message; }
+}
+
+function installAgents(configDir, opts) {
+  return installAgentsInto(path.join(configDir, 'agents'), opts);
+}
+
+function installCommandsInto(destDir, opts) {
+  try {
+    if (!fs.existsSync(SIGNAL_COMMANDS_SRC)) return null;
+    if (opts.dryRun) return null;
+    fs.mkdirSync(destDir, { recursive: true });
+    for (const ent of fs.readdirSync(SIGNAL_COMMANDS_SRC, { withFileTypes: true })) {
+      if (!ent.isFile()) continue;
+      if (!/\.(md|toml)$/.test(ent.name)) continue;
+      atomicWrite(
+        path.join(destDir, ent.name),
+        fs.readFileSync(path.join(SIGNAL_COMMANDS_SRC, ent.name), 'utf8'),
+        0o644,
+      );
+    }
+    return null;
+  } catch (e) { return e.message; }
+}
+
+function installCommands(configDir, opts) {
+  return installCommandsInto(path.join(configDir, 'commands'), opts);
+}
+
+// Register eap-signal-shrink wrapping an upstream MCP command string.
+function installMcpShrink(ctx) {
+  const { opts, configDir, note, ok, warn, results } = ctx;
+  if (!opts.withMcpShrink) return;
+  if (!fs.existsSync(SIGNAL_SHRINK)) {
+    warn('  eap-signal-shrink entry missing — skip --with-mcp-shrink');
+    return;
+  }
+  // Split upstream on whitespace (simple; quote-aware not required for typical `npx pkg path`).
+  const upstreamArgs = opts.withMcpShrink.match(/(?:[^\s"]+|"[^"]*")+/g).map((s) => s.replace(/^"|"$/g, ''));
+  const entry = {
+    command: process.execPath,
+    args: [SIGNAL_SHRINK, ...upstreamArgs],
+  };
+  const mcpPath = path.join(configDir, '.mcp.json');
+  const useCli = !ctx.configDirExplicit && hasCmd('claude');
+  if (opts.dryRun) {
+    note(`  MCP shrink: would register eap-signal-shrink → ${opts.withMcpShrink}`);
+    return;
+  }
+  if (useCli) {
+    const r = child_process.spawnSync(
+      'claude',
+      ['mcp', 'add', '--scope', 'user', 'eap-signal-shrink', '--', entry.command, ...entry.args],
+      { encoding: 'utf8' },
+    );
+    const out = `${r.stdout || ''}${r.stderr || ''}`;
+    if ((r.status || 0) === 0 || /already exists/i.test(out)) {
+      ok('  MCP eap-signal-shrink registered via claude mcp add');
+      return;
+    }
+    warn(`  claude mcp add eap-signal-shrink failed: ${(out.trim().split('\n')[0] || '').slice(0, 120)}`);
+  }
+  const cfg = readSettings(mcpPath);
+  if (cfg === null || !isPlainObject(cfg)) {
+    warn('  could not write eap-signal-shrink into .mcp.json');
+    results.failed.push(['mcp-shrink', 'mcp file unusable']);
+    return;
+  }
+  if (!isPlainObject(cfg.mcpServers)) cfg.mcpServers = {};
+  cfg.mcpServers['eap-signal-shrink'] = entry;
+  backupOnce(mcpPath);
+  writeSettings(mcpPath, cfg);
+  ok(`  MCP eap-signal-shrink registered in ${mcpPath}`);
 }
 
 // Remove installer-placed skills; leave any user files in those dirs.
@@ -400,12 +593,10 @@ function uninstallSkills(configDir, opts, names) {
   let removed = 0;
   for (const name of names) {
     const dir = path.join(configDir, 'skills', name);
-    const file = path.join(dir, 'SKILL.md');
-    if (!fs.existsSync(file)) continue;
+    if (!fs.existsSync(dir)) continue;
     if (opts.dryRun) { removed++; continue; }
     try {
-      fs.unlinkSync(file);
-      try { fs.rmdirSync(dir); } catch { /* keep dir if user left other files */ }
+      fs.rmSync(dir, { recursive: true, force: true });
       removed++;
     } catch { /* best effort */ }
   }
@@ -455,8 +646,8 @@ function installClaude(ctx) {
     else ok(`  [1/3] Signal${leanBody != null ? ' + Lean' : ''} rule written to ${claudeMd}`);
   }
 
-  // 1b. EAP-Lean skills (review/audit/debt/gain/help) → <configDir>/skills/ so
-  // /eap-lean-* is discoverable. Prompt-only markdown; gated by opts.lean.
+  // 1b. EAP-Lean skills (mode + review/audit/debt/gain/help) → <configDir>/skills/
+  // so /eap-lean* is discoverable. Prompt-only markdown; gated by opts.lean.
   if (opts.lean && !opts.dryRun) {
     const sErr = installSkills(configDir, opts, LEAN_SKILLS_SRC, LEAN_SKILLS);
     if (sErr) warn(`  [1/3] EAP-Lean skills install failed: ${sErr}`);
@@ -473,6 +664,19 @@ function installClaude(ctx) {
     else ok(`  [1/3] EAP-Runtime skills (${RUNTIME_SKILLS.length}) installed to ${path.join(configDir, 'skills')}`);
   } else if (opts.runtime) {
     note(`  [1/3] EAP-Runtime skills: copy ${RUNTIME_SKILLS.length} into ${path.join(configDir, 'skills')}`);
+  }
+
+  // 1d. EAP-Signal skills + eapcrew agents + slash commands (always with Signal).
+  {
+    const sigErr = installSkills(configDir, opts, SIGNAL_SKILLS_SRC, SIGNAL_SKILLS);
+    if (sigErr) warn(`  [1/3] EAP-Signal skills install failed: ${sigErr}`);
+    else ok(`  [1/3] EAP-Signal skills (${SIGNAL_SKILLS.length}) installed to ${path.join(configDir, 'skills')}`);
+    const aErr = installAgents(configDir, opts);
+    if (aErr) warn(`  [1/3] eapcrew agents install failed: ${aErr}`);
+    else ok(`  [1/3] eapcrew agents (${SIGNAL_AGENTS.length}) → ${path.join(configDir, 'agents')}`);
+    const cErr = installCommands(configDir, opts);
+    if (cErr) warn(`  [1/3] Signal commands install failed: ${cErr}`);
+    else ok(`  [1/3] Signal commands → ${path.join(configDir, 'commands')}`);
   }
 
   // 2. MCP servers.
@@ -526,12 +730,20 @@ function installClaude(ctx) {
       for (const { event, matcher, timeout } of HOOK_EVENTS) {
         addCommandHook(settings, event, {
           command: `"${node}" "${HOOK_DISPATCH}" ${event} "${eapConfPath}"`,
+          commandWindows: psCommandWindows(node, HOOK_DISPATCH, event, eapConfPath),
           marker: HOOK_MARKER, matcher: matcher || undefined, timeout,
         });
       }
       // Statusline: only claim the slot if the user hasn't set one — never clobber.
       if (!isPlainObject(settings.statusLine)) {
-        settings.statusLine = { type: 'command', command: `"${node}" "${STATUSLINE}"` };
+        settings.statusLine = {
+          type: 'command',
+          command: `"${node}" "${STATUSLINE}"`,
+          // Prefer the .ps1 wrapper on Windows (resolves node like install.ps1).
+          commandWindows: fs.existsSync(STATUSLINE_PS1)
+            ? `powershell -NoProfile -File "${STATUSLINE_PS1.replace(/"/g, '\\"')}"`
+            : psCommandWindows(node, STATUSLINE),
+        };
       }
       validateHookFields(settings, warn);
       writeSettings(settingsPath, settings);
@@ -543,6 +755,9 @@ function installClaude(ctx) {
   // Layer flags for the dispatcher (runtime/context enable state + repo root).
   const flagsErr = tryWrite(() => writeSettings(eapConfPath, { root: REPO_ROOT, runtime: opts.runtime, context: opts.context, lean: opts.lean, signalStatic: true, version: 1 }));
   if (flagsErr) { warn(`  layer-flags write failed (${eapConfPath}): ${flagsErr}`); results.failed.push(['claude-flags', flagsErr]); }
+
+  // Optional MCP shrink proxy wrapping an upstream server.
+  installMcpShrink(ctx);
 
   results.installed.push('claude');
 }
@@ -566,23 +781,154 @@ function removeInstallerCreatedEmpty(file, obj) {
   try { fs.unlinkSync(file); return true; } catch { return false; }
 }
 
-// ── Native EAP-Signal install (non-Claude AGENTS.md / SOUL.md agents) ─────────
-// Writes the SAME managed <!-- eap-signal:begin --> … block installClaude writes,
-// into the agent's global always-on rules file (native.signal). Signal ONLY — MCP
-// registration for these agents is a separate, later step. For a per-repo agent
-// (native.signal === null, e.g. cursor) there is no global file: print the
-// per-repo note and record it handled.
+// Skill names installed onto every native host that declares native.skills.
+function nativeSkillNames(opts) {
+  const names = [...SIGNAL_SKILLS];
+  if (opts.lean) names.push(...LEAN_SKILLS);
+  // Runtime skills (incl. eap-update) when MCP runtime layer is enabled — same
+  // gate as Claude. MCP-less hosts (pi/windsurf) still get the CLI eap-update
+  // skill; the other runtime skills are harmless prompt wrappers.
+  if (opts.runtime) names.push(...RUNTIME_SKILLS);
+  return names;
+}
+
+// Copy Signal (+ Lean [+ Runtime]) skills, and optional commands/agents, into a
+// native provider's declared directories. Dry-run notes only.
+function installNativeAssets(ctx, prov) {
+  const { opts, note, ok, warn } = ctx;
+  const n = prov.native || {};
+  if (n.skills) {
+    const root = resolveSentinelPath(n.skills);
+    const names = nativeSkillNames(opts);
+    if (opts.dryRun) {
+      note(`  skills: copy ${names.length} into ${root}/`);
+    } else {
+      const err = installSkillsInto(root, opts, SIGNAL_SKILLS_SRC, SIGNAL_SKILLS);
+      if (err) warn(`  Signal skills failed (${root}): ${err}`);
+      else {
+        let failed = false;
+        if (opts.lean) {
+          const lerr = installSkillsInto(root, opts, LEAN_SKILLS_SRC, LEAN_SKILLS);
+          if (lerr) { warn(`  Lean skills failed (${root}): ${lerr}`); failed = true; }
+        }
+        if (opts.runtime) {
+          const rerr = installSkillsInto(root, opts, RUNTIME_SKILLS_SRC, RUNTIME_SKILLS);
+          if (rerr) { warn(`  Runtime skills failed (${root}): ${rerr}`); failed = true; }
+        }
+        if (!failed) ok(`  skills (${names.length}) → ${root}`);
+      }
+    }
+  }
+  if (n.commands) {
+    const dest = resolveSentinelPath(n.commands);
+    if (opts.dryRun) note(`  commands: copy Signal slash cmds into ${dest}/`);
+    else {
+      const err = installCommandsInto(dest, opts);
+      if (err) warn(`  commands failed (${dest}): ${err}`);
+      else ok(`  commands → ${dest}`);
+    }
+  }
+  if (n.agents) {
+    const dest = resolveSentinelPath(n.agents);
+    if (opts.dryRun) note(`  agents: copy eapcrew into ${dest}/`);
+    else {
+      const err = installAgentsInto(dest, opts);
+      if (err) warn(`  agents failed (${dest}): ${err}`);
+      else ok(`  agents → ${dest}`);
+    }
+  }
+}
+
+// Gemini CLI extension: stage gemini-extension.json + generated GEMINI.md
+// (Signal+Lean from sources — no drifted copy in-repo) then
+// `gemini extensions install <staging>`.
+const GEMINI_EXT_JSON = path.join(REPO_ROOT, 'layers', 'eap-signal', 'gemini-extension.json');
+
+function buildGeminiContextMd(warn, lean) {
+  const signal = buildSignalBody(warn);
+  if (signal == null) return null;
+  const parts = [
+    '# EAP — Gemini extension context\n',
+    `${SIGNAL_BEGIN}\n${signal}\n${SIGNAL_END}\n`,
+  ];
+  if (lean) {
+    const leanBody = buildLeanBody(warn);
+    if (leanBody != null) parts.push(`${LEAN_BEGIN}\n${leanBody}\n${LEAN_END}\n`);
+  }
+  return parts.join('\n');
+}
+
+function installGeminiExt(ctx, prov) {
+  const { opts, say, note, ok, warn, results } = ctx;
+  say(`→ ${prov.label} — installing EAP Gemini extension (Signal${opts.lean ? ' + Lean' : ''})`);
+  if (!fs.existsSync(GEMINI_EXT_JSON)) {
+    warn('  gemini-extension.json missing — cannot wire Gemini');
+    results.failed.push([prov.id, 'gemini-extension.json missing']);
+    return;
+  }
+  const ctxMd = buildGeminiContextMd(warn, opts.lean);
+  if (ctxMd == null) { results.failed.push([prov.id, 'Signal rule unreadable']); return; }
+
+  // File-based extension drop under ~/.gemini/extensions/eap (works offline).
+  // When `gemini` is on PATH, also run `gemini extensions install` for registry.
+  const extDir = path.join(os.homedir(), '.gemini', 'extensions', 'eap');
+
+  if (opts.dryRun) {
+    note(`  Gemini: write ${extDir}/gemini-extension.json + GEMINI.md`);
+    if (hasCmd('gemini')) note(`  Gemini: gemini extensions install ${extDir}`);
+    results.dryRun.push(prov.id);
+    return;
+  }
+
+  try {
+    fs.mkdirSync(extDir, { recursive: true });
+    fs.copyFileSync(GEMINI_EXT_JSON, path.join(extDir, 'gemini-extension.json'));
+    atomicWrite(path.join(extDir, 'GEMINI.md'), ctxMd, 0o644);
+    ok(`  Gemini extension files → ${extDir}`);
+    if (hasCmd('gemini')) {
+      let r = child_process.spawnSync('gemini', ['extensions', 'install', extDir, '--force'], {
+        encoding: 'utf8', stdio: 'pipe',
+      });
+      if ((r.status || 0) !== 0) {
+        r = child_process.spawnSync('gemini', ['extensions', 'install', extDir], {
+          encoding: 'utf8', stdio: 'pipe',
+        });
+      }
+      if ((r.status || 0) === 0) ok('  Gemini: registered via gemini extensions install');
+      else {
+        const msg = `${r.stdout || ''}${r.stderr || ''}`.trim().split('\n')[0] || 'unknown';
+        warn(`  gemini extensions install failed (${msg}); files remain at ${extDir}`);
+      }
+    } else {
+      note('  gemini CLI not on PATH — files written; run `gemini extensions install` later if needed');
+    }
+    results.installed.push(prov.id);
+  } catch (e) {
+    warn(`  Gemini install failed: ${(e && e.message) || e}`);
+    results.failed.push([prov.id, (e && e.message) || 'gemini install failed']);
+  }
+}
+
+// ── Native EAP-Signal install (non-Claude AGENTS.md / SOUL.md / IDE rules) ───
+// Writes the SAME managed blocks installClaude writes into native.signal, then
+// drops skills/commands/agents when declared. MCP is a separate follow-up step.
 function installSignalNative(ctx, prov) {
   const { opts, say, note, ok, warn, results } = ctx;
-  const target = resolveNativeSignal(prov);
+  const n = prov.native || {};
 
-  // Per-repo only (cursor): no global rules file to write.
+  if (n.kind === 'gemini-ext') { installGeminiExt(ctx, prov); return; }
+
+  const target = resolveNativeSignal(prov);
   if (target == null) {
-    say(`→ ${prov.label} — EAP-Signal + EAP-Lean are per-repo (no global rules file)`);
-    note('  cursor-agent only honors a per-project AGENTS.md; drop one carrying the');
-    note(`  ${SIGNAL_BEGIN} block (and the ${LEAN_BEGIN} block) at each repo root you use it in.`);
-    if (opts.dryRun) results.dryRun.push(prov.id);
-    else results.installed.push(prov.id);
+    // Skills/MCP-only native (no rules file) — still install assets.
+    say(`→ ${prov.label} — no global rules file; installing declared assets`);
+    if (opts.dryRun) {
+      installNativeAssets(ctx, prov);
+      results.dryRun.push(prov.id);
+    } else {
+      installNativeAssets(ctx, prov);
+      results.installed.push(prov.id);
+    }
     return;
   }
 
@@ -594,16 +940,15 @@ function installSignalNative(ctx, prov) {
   if (opts.dryRun) {
     note(`  Signal: write managed ${SIGNAL_BEGIN} block into ${target}`);
     if (leanBody != null) note(`  Lean: write managed ${LEAN_BEGIN} block into ${target}`);
+    installNativeAssets(ctx, prov);
     results.dryRun.push(prov.id);
     return;
   }
 
-  // Guarded, single symlink-safe atomic write of both managed blocks. A read-only
-  // rules dir (mkdtempSync EACCES / EROFS) records a clean per-agent failure
-  // instead of aborting the whole multi-agent run.
-  const err = writeRulesBlocks(target, signalBody, leanBody);
+  const err = writeRulesBlocks(target, signalBody, leanBody, n.frontmatter);
   if (err) { warn(`  rules write failed for ${prov.label} (${target}): ${err}`); results.failed.push([prov.id, err]); return; }
   ok(`  Signal${leanBody != null ? ' + Lean' : ''} rule written to ${target}`);
+  installNativeAssets(ctx, prov);
   results.installed.push(prov.id);
 }
 
@@ -783,13 +1128,25 @@ function uninstall(ctx) {
     if (stripped) ok(text === '' ? `  removed ${claudeMd}` : `  stripped EAP blocks from ${claudeMd}`);
   }
 
-  // 1b. EAP-Lean + EAP-Runtime skills.
-  const skillsRemoved = uninstallSkills(configDir, opts, [...LEAN_SKILLS, ...RUNTIME_SKILLS]);
+  // 1b. EAP-Lean + EAP-Runtime + EAP-Signal skills; eapcrew agents; commands.
+  const skillsRemoved = uninstallSkills(configDir, opts, [...LEAN_SKILLS, ...RUNTIME_SKILLS, ...SIGNAL_SKILLS]);
   if (skillsRemoved) ok(`  removed ${skillsRemoved} EAP skill(s) from ${path.join(configDir, 'skills')}`);
+  if (!opts.dryRun) {
+    for (const name of SIGNAL_AGENTS) {
+      const p = path.join(configDir, 'agents', name);
+      try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch { /* */ }
+    }
+    if (fs.existsSync(SIGNAL_COMMANDS_SRC)) {
+      for (const ent of fs.readdirSync(SIGNAL_COMMANDS_SRC)) {
+        const p = path.join(configDir, 'commands', ent);
+        try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch { /* */ }
+      }
+    }
+  }
 
   // 2. MCP servers. Remove at --scope user to match the install scope.
   if (useCli) {
-    for (const name of ['eap-runtime', 'eap-context']) {
+    for (const name of ['eap-runtime', 'eap-context', 'eap-signal-shrink']) {
       if (!opts.dryRun) child_process.spawnSync('claude', ['mcp', 'remove', '--scope', 'user', name], { stdio: 'ignore' });
     }
     ok('  removed MCP servers via `claude mcp remove`');
@@ -797,7 +1154,7 @@ function uninstall(ctx) {
     const cfg = readSettings(mcpPath);
     if (isPlainObject(cfg) && cfg.mcpServers) {
       let removed = 0;
-      for (const name of ['eap-runtime', 'eap-context']) if (cfg.mcpServers[name]) { delete cfg.mcpServers[name]; removed++; }
+      for (const name of ['eap-runtime', 'eap-context', 'eap-signal-shrink']) if (cfg.mcpServers[name]) { delete cfg.mcpServers[name]; removed++; }
       if (isPlainObject(cfg.mcpServers) && Object.keys(cfg.mcpServers).length === 0) delete cfg.mcpServers;
       if (!opts.dryRun) {
         // Drop a now-empty stub we created; otherwise write the trimmed config.
@@ -830,20 +1187,60 @@ function uninstall(ctx) {
   if (fs.existsSync(eapConfPath) && !opts.dryRun) { try { fs.unlinkSync(eapConfPath); } catch { /* best effort */ } }
 
   // Native EAP-Signal + EAP-Lean blocks (codex/opencode/pi/grok/antigravity/
-  // hermes). Strip exactly our fenced blocks from each agent's global rules file,
-  // preserving all surrounding user content; delete the file only when nothing
-  // else remains. cursor (native.signal === null) is per-repo — no global file.
+  // hermes/cursor/windsurf/cline). Strip managed fences; delete the file when
+  // nothing but optional IDE frontmatter remains.
   for (const prov of PROVIDERS) {
-    if (!prov.native) continue;
+    if (!prov.native || prov.native.kind === 'gemini-ext') continue;
     const target = resolveNativeSignal(prov);
     if (target == null || !fs.existsSync(target)) continue;
     const { text, stripped } = stripEapBlocks(fs.readFileSync(target, 'utf8'));
     if (!stripped) continue;
+    const fm = prov.native.frontmatter || '';
+    const leftover = text.replace(fm, '').trim();
     if (!opts.dryRun) {
-      if (text === '') { try { fs.unlinkSync(target); } catch { /* best effort */ } }
+      if (leftover === '') { try { fs.unlinkSync(target); } catch { /* best effort */ } }
       else atomicWrite(target, text, 0o644); // symlink-safe, matches install
     }
-    ok(text === '' ? `  removed ${target}` : `  stripped EAP blocks from ${prov.label} (${target})`);
+    ok(leftover === '' ? `  removed ${target}` : `  stripped EAP blocks from ${prov.label} (${target})`);
+  }
+
+  // Native skills / commands / agents trees.
+  const skillNames = [...SIGNAL_SKILLS, ...LEAN_SKILLS, ...RUNTIME_SKILLS];
+  for (const prov of PROVIDERS) {
+    if (!prov.native) continue;
+    if (prov.native.skills) {
+      const root = resolveSentinelPath(prov.native.skills);
+      let removed = 0;
+      for (const name of skillNames) {
+        const dir = path.join(root, name);
+        if (!fs.existsSync(dir)) continue;
+        if (!opts.dryRun) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* */ } }
+        removed++;
+      }
+      if (removed) ok(`  removed ${removed} EAP skill(s) from ${prov.label} (${root})`);
+    }
+    if (prov.native.commands && !opts.dryRun && fs.existsSync(SIGNAL_COMMANDS_SRC)) {
+      const dest = resolveSentinelPath(prov.native.commands);
+      for (const ent of fs.readdirSync(SIGNAL_COMMANDS_SRC)) {
+        try { fs.unlinkSync(path.join(dest, ent)); } catch { /* */ }
+      }
+    }
+    if (prov.native.agents && !opts.dryRun) {
+      const dest = resolveSentinelPath(prov.native.agents);
+      for (const name of SIGNAL_AGENTS) {
+        try { fs.unlinkSync(path.join(dest, name)); } catch { /* */ }
+      }
+    }
+  }
+
+  // Gemini extension files + optional CLI unregister.
+  const geminiExt = path.join(os.homedir(), '.gemini', 'extensions', 'eap');
+  if (fs.existsSync(geminiExt)) {
+    if (!opts.dryRun) { try { fs.rmSync(geminiExt, { recursive: true, force: true }); } catch { /* */ } }
+    ok(`  removed Gemini extension dir ${geminiExt}`);
+  }
+  if (hasCmd('gemini') && !opts.dryRun) {
+    child_process.spawnSync('gemini', ['extensions', 'uninstall', 'eap'], { stdio: 'ignore' });
   }
 
   // Native MCP registrations (codex/grok/hermes CLI + cursor/antigravity/opencode
@@ -871,7 +1268,8 @@ function printList(noColor) {
   for (const p of PROVIDERS) {
     let status;
     if (p.wired) status = c.green('end-to-end (all 3 + lean)');
-    else if (p.native && p.native.mcp) status = c.green(p.native.signal === null ? 'signal+lean(per-repo) + mcp' : 'signal + lean + mcp');
+    else if (p.native && p.native.kind === 'gemini-ext') status = c.green('signal + lean (gemini ext)');
+    else if (p.native && p.native.mcp) status = c.green('signal + lean + mcp');
     else if (p.native) status = c.green('signal + lean');
     else status = c.dim('planned');
     const soft = p.soft ? c.dim(' (soft-detect)') : '';
@@ -879,9 +1277,9 @@ function printList(noColor) {
   }
   process.stdout.write('\n');
   process.stdout.write(c.dim(`  ${wired} provider wired end-to-end (Claude Code, all 3 layers + Lean); ${signalMcp} with native EAP-Signal + EAP-Lean + both MCP servers; ${signalOnly} EAP-Signal + EAP-Lean only (no MCP); ${planned} detected + planned.\n`));
-  process.stdout.write(c.dim('  "signal + lean" = the two always-on prompt rules (verdict-first output + minimal-code craft); "+ mcp" adds both EAP MCP servers; cursor is per-repo.\n'));
-  process.stdout.write(c.dim('  EAP-Lean installs beside EAP-Signal in the same rules file everywhere Signal lands; pass --no-lean to opt out of it.\n'));
-  process.stdout.write(c.dim('  Planned providers are detected and given a manual plan — never silently claimed as wired.\n'));
+  process.stdout.write(c.dim('  "signal + lean" = always-on rules (+ skills where the host has a skills dir); "+ mcp" adds both EAP MCP servers.\n'));
+  process.stdout.write(c.dim('  EAP-Lean installs beside EAP-Signal everywhere Signal lands; pass --no-lean to opt out.\n'));
+  process.stdout.write(c.dim('  Planned: marketplace-only hosts (continue/kilo/roo/…) and Copilot (no stable global instructions path).\n'));
   process.stdout.write(c.dim('  Layers: Signal + Lean (always-on rules) + eap-runtime MCP + eap-context MCP + hook dispatcher.\n'));
 }
 
@@ -891,6 +1289,8 @@ function printHelp() {
 
 USAGE
   node bin/eap-install.mjs [flags]
+  node bin/eap-install.mjs update [update-flags]   # → bin/lib/update.mjs
+  eap install | eap update | eap uninstall | eap list | eap doctor
 
 Run with no flags on a terminal to launch the interactive TUI (auto-detect
 agents, curate which agents + layers, confirm). Piped/CI runs use flags.
@@ -906,6 +1306,10 @@ FLAGS
   --no-runtime           Skip the eap-runtime (working-memory offload) MCP server.
   --no-context           Skip the eap-context (code-symbol-graph) MCP server.
   --no-lean              Skip the always-on EAP-Lean (minimal-code craft) rule.
+  --with-mcp-shrink="<upstream>"
+                         Register eap-signal-shrink wrapping <upstream> MCP cmd.
+                         Example: --with-mcp-shrink="npx @modelcontextprotocol/server-filesystem /tmp"
+  --no-mcp-shrink        Skip MCP shrink (default).
   --uninstall, -u        Remove the EAP Signal + Lean blocks, MCP entries, and hooks.
   --non-interactive      Never prompt; use defaults (skips the TUI).
   --no-color             Disable ANSI colors.
@@ -915,20 +1319,26 @@ FLAGS
 WHAT GETS INSTALLED (Claude Code, end-to-end)
   1. EAP-Signal   -> managed block in <configDir>/CLAUDE.md
      EAP-Lean     -> second always-on managed block in the same CLAUDE.md (--no-lean opts out)
+     skills       -> Signal + Lean + Runtime skills under <configDir>/skills/
+     agents       -> eapcrew-* under <configDir>/agents/
+     commands     -> slash commands under <configDir>/commands/
   2. eap-runtime -> node   ${RUNTIME_MCP}
      eap-context -> python3 ${CONTEXT_MCP} <project-root>
-  3. hooks       -> SessionStart / PreToolUse / PostToolUse / PreCompact in
-                    <configDir>/settings.json, running src/hooks/eap-dispatch.mjs
+     eap-signal-shrink (optional) -> node ${SIGNAL_SHRINK} <upstream…>
+  3. hooks       -> SessionStart / UserPromptSubmit / SubagentStart / PreToolUse /
+                    PostToolUse / PreCompact / Stop in <configDir>/settings.json,
+                    running src/hooks/eap-dispatch.mjs
 
-NATIVE AGENTS (EAP-Signal + EAP-Lean rules + both EAP MCP servers, registered natively)
-  codex, grok        -> Signal rule + '<bin> mcp add … -- <cmd> <args>'
-  hermes             -> Signal rule + 'hermes mcp add … --command <cmd> --args <args>'
-  opencode           -> Signal rule + 'mcp' key in opencode.jsonc (type:local)
-  cursor, antigravity-> MCP in ~/.cursor/mcp.json / ~/.gemini/config/mcp_config.json
-                        (cursor's Signal rule is per-repo AGENTS.md, MCP is global)
-  pi                 -> Signal rule only (Pi has no MCP; it uses npm extensions)
-Every other provider is detected and reported as "planned" — EAP does not claim
-to wire an agent it has not implemented. See --list for the full matrix.
+NATIVE AGENTS (Signal + Lean rules; skills where supported; MCP where supported)
+  codex, grok, hermes, antigravity, cursor
+                     -> rules + Signal/Lean/Runtime skills + MCP (CLI or JSON)
+  opencode           -> AGENTS.md + skills + commands (/eap-update) + eapcrew + MCP
+  pi                 -> AGENTS.md + skills (no MCP)
+  windsurf           -> ~/.windsurf/rules/eap.md + skills
+  cline              -> ~/Documents/Cline/Rules/eap.md (rules only; skills need marketplace IDs)
+  gemini             -> ~/.gemini/extensions/eap context (GEMINI.md); skills N/A
+Planned (marketplace / no stable global adapter): Copilot, continue/kilo/roo/augment, and
+the npx-skills marketplace CLI hosts — see --list.
 `);
 }
 
@@ -1033,7 +1443,17 @@ async function runTui(opts, c) {
 }
 
 async function main() {
-  const opts = parseArgs(process.argv.slice(2));
+  const rawArgv = process.argv.slice(2);
+  // `node bin/eap-install.mjs update …` delegates to the graceful updater so
+  // the legacy bin keeps working as a single entrypoint too.
+  if (rawArgv[0] === 'update') {
+    const { runUpdateCli } = await import('./lib/update.mjs');
+    return runUpdateCli(rawArgv.slice(1), {
+      repoRoot: REPO_ROOT,
+      installBin: __filename,
+    });
+  }
+  const opts = parseArgs(rawArgv);
   if (opts.help) { printHelp(); return 0; }
   if (opts.listOnly) { printList(opts.noColor); return 0; }
 
@@ -1128,6 +1548,21 @@ function runInstall(opts) {
   }
   process.stdout.write('\n');
   ctx.note(`  uninstall: node bin/eap-install.mjs --uninstall${configDirExplicit ? ` --config-dir ${configDir}` : ''}`);
+  ctx.note('  update:    eap update   (or: node bin/eap-install.mjs update)');
+
+  // Record checkout path + HEAD sha so later `eap update` can find this install.
+  if (!opts.dryRun && ctx.results.installed.length) {
+    try {
+      let sha = null;
+      try {
+        sha = child_process.execFileSync('git', ['rev-parse', 'HEAD'], {
+          cwd: REPO_ROOT, encoding: 'utf8', timeout: 5_000,
+        }).trim();
+      } catch { /* non-git checkout */ }
+      writeInstallState({ root: REPO_ROOT, sha });
+      ctx.note('  state:     ~/.eap/install-state.json');
+    } catch { /* best-effort */ }
+  }
 
   return ctx.results.failed.length && !ctx.results.installed.length ? 1 : 0;
 }

@@ -91,7 +91,8 @@ from lossless retrieval with recall. See `docs/EFFICIENCY.md`.
 MIT, sole-maintained, self-contained, with zero upstream runtime coupling and
 **zero third-party code or dependencies**. Every layer is original / clean-room
 code. EAP-Signal descends from TLDR ← caveman (MIT). EAP-Lean is
-**concept-derived from the MIT-licensed ponytail project — no ponytail code used**.
+**derived from the MIT-licensed ponytail project** (rule/docs/examples/bench
+ports; hook runtime reimplemented — see `docs/legal/ATTRIBUTION.md`).
 EAP-Context is an independent Python-stdlib symbol-graph engine
 **concept-derived from the MIT-licensed graphify project — no graphify code or
 dependencies used**. The Elastic-Licensed context-mode project (behind

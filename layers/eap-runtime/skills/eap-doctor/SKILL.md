@@ -17,16 +17,17 @@ Call the `eap_doctor` MCP tool (eap-runtime server), then present the report.
 
 ## Presentation
 
-Group the result into four lines, worst news first:
+Group the result, worst news first:
 
 1. **Store** — `store.ok` / integrity; if not `ok`, suggest `eap_purge` (after
    warning it clears indexed documents) or deleting `.eap/runtime.db`.
 2. **SQLite** — `sqlite.ok`/`fts5`/`trigram`; a failure here means Node < 22 or
    a build without `node:sqlite`. The fix is upgrading Node — by design there
-   is **no** third-party sqlite fallback.
-3. **Runtimes** — list only the languages that are *missing*; the available
-   ones need no airtime.
-4. **Node/platform** — version + platform, one line.
+   is **no** third-party sqlite fallback / better-sqlite3 heal.
+3. **Hooks** — `hooks.ok` / registered events; if missing, point to
+   `node bin/eap-install.mjs`.
+4. **Runtimes** — list only the languages that are *missing*.
+5. **Version / Node / platform** — `version`, `node`, `platform`.
 
 All healthy: one line — "EAP-Runtime healthy" plus the store's measured stats
 (bytes only, no percentages or dollar figures).

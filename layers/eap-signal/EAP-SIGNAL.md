@@ -48,11 +48,11 @@ Fragments OK. Drop articles. Never open with validation. Answer-only. Prioritize
 - **lite** — trim filler; keep near-normal sentences. Safest.
 - **full** (default) — hard caps above; verdict-first shape dispatch.
 - **ultra** — bare fragments; only load-bearing tokens survive.
-- **wenyan-lite / wenyan-full / wenyan-ultra** — Classical-Chinese (文言文) tiers for maximum character compression; use only when the user reads 文言文.
+- **wenyan-lite / wenyan-full / wenyan-ultra** — Classical-Chinese (文言文) tiers for maximum character compression; use only when the user reads 文言文. Bare **`wenyan` ≡ `wenyan-full`**.
 - **off** — normal prose.
 
 ## Persistence
-ACTIVE EVERY RESPONSE. No drift back to filler. Still active if unsure. Off only: "stop signal" / "normal mode".
+ACTIVE EVERY RESPONSE. No drift back to filler. Still active if unsure. Off only: "stop signal" / "stop tldr" / "normal mode".
 
 ## Commands
-`/eap signal <lite|full|ultra|wenyan-*|off>` switches the active level; it persists until changed. Absent argument re-applies the rules live for long sessions.
+`/eap signal <lite|full|ultra|wenyan|wenyan-*|off>` switches the active level; it persists until changed. Absent argument re-applies the rules live for long sessions. Also: `/eap-signal-commit`, `/eap-signal-review`, `/eap-signal-compress`, `/eap-signal-stats`, `/eap-signal-help`, `/eap-signal-init`.

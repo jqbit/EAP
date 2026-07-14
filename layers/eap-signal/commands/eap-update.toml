@@ -1,0 +1,2 @@
+description = "Update EAP from GitHub and re-run the installer"
+prompt = "Run `eap update {{args}}` via Bash (or `node bin/eap.mjs update {{args}}` if eap is not on PATH). This applies the update — operator typed /eap-update. Present the CLI output; do not invent versions. Warn before --force."

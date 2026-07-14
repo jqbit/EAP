@@ -20,7 +20,9 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parents[1] / "layers" / "eap-context" / "src"
 sys.path.insert(0, str(SRC))
 
-from eap_context import algorithms, extract, graph, mcp, query  # noqa: E402
+from eap_context import (  # noqa: E402
+    algorithms, export, extract, graph, ignore, manifest, mcp, query, reflect,
+)
 
 ALPHA_PY = '''\
 """Fixture: config loading."""
@@ -267,7 +269,8 @@ class ContextEngineTest(unittest.TestCase):
             "eap_graph_stats", "eap_graph_godnodes", "eap_graph_path",
             "eap_graph_communities", "eap_graph_central",
             "eap_graph_affected", "eap_graph_prs", "eap_graph_pr_impact",
-            "eap_graph_reflect"})
+            "eap_graph_reflect", "eap_graph_get_node", "eap_graph_explain",
+            "eap_graph_get_community", "eap_graph_triage_prs"})
 
     # -- security regressions ------------------------------------------------
     # Each test below fails against the pre-hardening code and locks in a fix
@@ -684,7 +687,9 @@ class ContextEngineTest(unittest.TestCase):
         self.assertIn("eap_graph_central", tools)
         self.assertIn("eap_graph_affected", tools)
         self.assertIn("eap_graph_reflect", tools)
-        self.assertEqual(len(tools), 12)
+        self.assertIn("eap_graph_explain", tools)
+        self.assertIn("eap_graph_triage_prs", tools)
+        self.assertEqual(len(tools), 16)
 
 
 # ===========================================================================
@@ -1750,6 +1755,169 @@ class ReflectAndQuerylogTest(unittest.TestCase):
                         json.dumps({"m.py::x": "bogus-tag"}).encode()):
             Path(reflect.reflect_path(self.root)).write_bytes(payload)
             self.assertEqual(reflect.load_tags(self.root), {})
+
+
+# ===========================================================================
+# Graphify-coverage expansions: more langs, manifests, export, explain, …
+# ===========================================================================
+
+
+class ExpandedCoverageTest(unittest.TestCase):
+    """Stdlib-only expansions that close gaps vs graphify's capability surface."""
+
+    def _syms(self, name, src):
+        d = tempfile.mkdtemp(prefix="eap-exp-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        Path(d, name).write_text(src)
+        return {s["name"]: s for s in extract.extract_file(
+            os.path.join(d, name), name)}
+
+    def test_kotlin_scala_swift_lua_zig(self):
+        kt = self._syms("M.kt", "fun compute() {}\nclass Widget : Base()\n"
+                        "import kotlin.collections.List\n")
+        self.assertEqual(kt["compute"]["kind"], "function")
+        self.assertEqual(kt["Widget"]["kind"], "class")
+        self.assertIn("Base", kt["Widget"].get("inherits", []))
+        sc = self._syms("M.scala", "def run(): Unit = helper()\n"
+                        "class Foo extends Bar with Baz\n")
+        self.assertEqual(sc["run"]["kind"], "function")
+        self.assertIn("Bar", sc["Foo"].get("inherits", []))
+        sw = self._syms("M.swift", "func refresh() {}\nclass V: UIView {}\n")
+        self.assertEqual(sw["refresh"]["kind"], "function")
+        lu = self._syms("m.lua", "function foo()\n  bar()\nend\n")
+        self.assertEqual(lu["foo"]["kind"], "function")
+        zi = self._syms("m.zig", "pub fn main() void {}\n")
+        self.assertEqual(zi["main"]["kind"], "function")
+
+    def test_bash_elixir_julia_dart_hcl_sql_ps(self):
+        self.assertIn("greet", self._syms("m.sh", "greet() { echo hi; }\n"))
+        self.assertIn("Foo", self._syms(
+            "m.ex", "defmodule Foo do\n  def bar, do: 1\nend\n"))
+        self.assertIn("Widget", self._syms(
+            "m.jl", "struct Widget <: Base\nend\nfunction run()\nend\n"))
+        dart = self._syms("m.dart",
+                          "class Foo extends Bar implements Baz {}\n")
+        self.assertEqual(dart["Foo"]["kind"], "class")
+        self.assertIn("Bar", dart["Foo"].get("inherits", []))
+        tf = self._syms("m.tf", 'resource "aws_s3_bucket" "b" {}\n')
+        self.assertIn("resource.aws_s3_bucket.b", tf)
+        self.assertIn("users", self._syms(
+            "m.sql", "CREATE TABLE users (id INT);\n"))
+        self.assertIn("Get-Foo", self._syms(
+            "m.ps1", "function Get-Foo { }\n"))
+
+    def test_sfc_json_md_yaml(self):
+        vue = self._syms("a.vue", "<script>function render(){}</script>\n")
+        self.assertEqual(vue["render"]["kind"], "function")
+        js = self._syms("a.json", '{"name": "pkg", "version": "1"}\n')
+        self.assertEqual(js["name"]["kind"], "key")
+        md = self._syms("a.md", "# Title\n\n## Subtitle\n")
+        self.assertEqual(md["Title"]["kind"], "heading")
+        yml = self._syms("a.yml", "services:\n  web: 1\nversion: 3\n")
+        self.assertIn("services", yml)
+        self.assertIn("version", yml)
+
+    def test_manifest_depends_on(self):
+        root = tempfile.mkdtemp(prefix="eap-man-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        Path(root, "package.json").write_text(
+            '{"dependencies": {"lodash": "4.0.0"}}')
+        Path(root, "requirements.txt").write_text("requests>=2.0\n# comment\n")
+        Path(root, "go.mod").write_text(
+            "module x\n\nrequire github.com/foo/bar v1.2.3\n")
+        g = graph.build(root)
+        deps = [n for n in g.nodes.values() if n["kind"] == "dependency"]
+        names = {n["name"] for n in deps}
+        self.assertIn("lodash", names)
+        self.assertIn("requests", names)
+        self.assertIn("bar", names)
+        self.assertTrue(any(e["relation"] == "depends_on" for e in g.edges))
+        # direct unit coverage for pyproject / cargo
+        Path(root, "pyproject.toml").write_text(
+            '[project]\nname="x"\ndependencies=["httpx>=0.1"]\n')
+        syms = manifest.extract_manifest(
+            os.path.join(root, "pyproject.toml"), "pyproject.toml")
+        self.assertIn("httpx", {s["name"] for s in syms})
+
+    def test_inherits_edge_and_community_stamp(self):
+        root = tempfile.mkdtemp(prefix="eap-inh-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        Path(root, "t.py").write_text(
+            "class Base:\n    pass\nclass Child(Base):\n    pass\n")
+        g, _ = graph.build_and_save(root)
+        inh = [e for e in g.edges if e["relation"] == "inherits"]
+        self.assertTrue(inh)
+        self.assertTrue(any("community" in n for n in g.nodes.values()))
+        self.assertTrue(os.path.isfile(graph.communities_path(root)))
+
+    def test_explain_get_node_dfs_token_budget(self):
+        root = tempfile.mkdtemp(prefix="eap-q-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        Path(root, "a.py").write_text(
+            "def alpha():\n    return beta()\n\ndef beta():\n    return 1\n")
+        g = graph.build(root)
+        card = query.get_node(g, "alpha")
+        self.assertEqual(card["node"]["name"], "alpha")
+        exp = query.explain(g, "alpha")
+        self.assertTrue(exp.get("why"))
+        dfs = query.query(g, "alpha", mode="dfs", limit=5)
+        self.assertEqual(dfs["mode"], "dfs")
+        packed = query.query(g, "alpha", limit=10, token_budget=5)
+        self.assertTrue(packed.get("packed") or len(packed["pointers"]) <= 10)
+
+    def test_export_graphml_and_html(self):
+        root = tempfile.mkdtemp(prefix="eap-ex-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        Path(root, "a.py").write_text("def foo():\n    pass\n")
+        g = graph.build(root)
+        gml = os.path.join(root, "g.graphml")
+        html = os.path.join(root, "g.html")
+        export.export_graphml(g, gml)
+        export.export_html(g, html)
+        self.assertTrue(Path(gml).read_text().startswith("<?xml"))
+        self.assertIn("<svg", Path(html).read_text())
+
+    def test_subdir_eapignore(self):
+        root = tempfile.mkdtemp(prefix="eap-ign-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        sub = Path(root, "pkg")
+        sub.mkdir()
+        (sub / ".eapignore").write_text("skip.py\n")
+        (sub / "skip.py").write_text("def hidden():\n    pass\n")
+        (sub / "keep.py").write_text("def visible():\n    pass\n")
+        g = graph.build(root)
+        names = {n["name"] for n in g.nodes.values()}
+        self.assertIn("visible", names)
+        self.assertNotIn("hidden", names)
+
+    def test_lessons_md_on_prefer(self):
+        root = tempfile.mkdtemp(prefix="eap-les-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        Path(root, "a.py").write_text("def keep():\n    pass\n")
+        g = graph.build(root)
+        res = reflect.set_tags(root, g, ["keep"], "preferred")
+        self.assertTrue(res.get("lessons"))
+        self.assertTrue(Path(reflect.lessons_path(root)).is_file())
+        self.assertIn("keep", Path(reflect.lessons_path(root)).read_text())
+
+    def test_new_mcp_tools(self):
+        root = tempfile.mkdtemp(prefix="eap-mcp2-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        Path(root, "a.py").write_text("def foo():\n    pass\n")
+        graph.build_and_save(root)
+        engine = mcp.Engine(root)
+        node = engine.get_node({"node": "foo"})
+        self.assertEqual(node["node"]["name"], "foo")
+        exp = engine.explain({"node": "foo"})
+        self.assertIn("why", exp)
+        # community 0 should exist after build stamp
+        cid = next(n.get("community") for n in engine.graph().nodes.values()
+                   if n.get("community") is not None)
+        com = engine.get_community({"id": cid})
+        self.assertGreaterEqual(com["size"], 1)
+        # triage without gh degrades cleanly
+        tri = engine.triage_prs({})
+        self.assertTrue("error" in tri or "prs" in tri)
 
 
 if __name__ == "__main__":

@@ -11,8 +11,9 @@ implementation is Python standard library only.
 __version__ = "0.1.0"
 
 from . import (  # noqa: F401
-    algorithms, extract, graph, hooks, ignore, mcp, prs, query, reflect,
+    algorithms, export, extract, graph, hooks, ignore, manifest, mcp, prs,
+    query, reflect,
 )
 
-__all__ = ["algorithms", "extract", "graph", "hooks", "ignore", "query",
-           "mcp", "prs", "reflect", "__version__"]
+__all__ = ["algorithms", "export", "extract", "graph", "hooks", "ignore",
+           "manifest", "query", "mcp", "prs", "reflect", "__version__"]

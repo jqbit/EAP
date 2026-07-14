@@ -109,13 +109,16 @@ export async function upgrade({ tag = null, store = null, doctor = null, lsRemot
     storeHealth,
     doctor: doctorReport,
     verification: 'unavailable — no checksum manifest (checksums.sha256) exists in this release channel yet; '
-      + 'auto-apply is refused rather than pulling unverified code.',
+      + 'MCP auto-apply is refused rather than pulling unverified code. '
+      + 'CLI `eap update` applies because the operator typed it (explicit consent).',
     plan: [
+      `eap update --ref ${resolved.tag}   # recommended: CLI apply (fetch + checkout + reinstall)`,
+      `# or manually:`,
       `git -C <eap-repo> fetch --tags ${remote}`,
       `git -C <eap-repo> verify-tag ${resolved.tag}  # if the tag is signed; otherwise inspect it`,
       `git -C <eap-repo> checkout ${resolved.tag}  # pinned tag, never a mutable branch`,
-      'node bin/eap-install.mjs  # re-run the installer to rewire hooks/MCP',
-      'eap_doctor  # confirm store + runtimes are healthy after the switch',
+      'node bin/eap-install.mjs --non-interactive  # rewire hooks/MCP',
+      'eap doctor  # confirm store + runtimes are healthy after the switch',
     ],
   };
 }

@@ -13,7 +13,7 @@ import { fetchUrl, assessHostIp, htmlToText, clearFetchCache } from '../layers/e
 const EXPECTED_TOOLS = [
   'eap_execute', 'eap_execute_file', 'eap_batch_execute',
   'eap_index', 'eap_search', 'eap_fetch', 'eap_fetch_and_index',
-  'eap_stats', 'eap_offload', 'eap_purge', 'eap_doctor',
+  'eap_stats', 'eap_report', 'eap_offload', 'eap_purge', 'eap_doctor',
   'eap_upgrade', 'eap_session_snapshot', 'eap_session_restore',
 ];
 
@@ -201,16 +201,57 @@ test('eap_batch_execute runs a bounded batch via dispatch', async () => {
   assert.equal(sc(r).results[0].output.trim(), '6');
 });
 
-test('eap_doctor self-checks node, sqlite, runtimes, and store health', async () => {
+test('eap_doctor self-checks node, sqlite, runtimes, store, hooks, version', async () => {
   const { dispatch } = harness();
   const r = await call(dispatch, 1, 'eap_doctor');
   const d = sc(r);
   assert.match(d.node, /^v\d+/);
+  assert.ok(d.version);
   assert.equal(d.sqlite.ok, true);
   assert.equal(d.sqlite.trigram, true);
   assert.equal(typeof d.runtimes.python3.available, 'boolean');
   assert.equal(typeof d.runtimes.ruby.available, 'boolean');
   assert.equal(d.store.ok, true);
+  assert.ok(d.hooks);
+  assert.equal(d.heal.attempted, false);
+  assert.match(d.heal.policy, /no better-sqlite3/);
+});
+
+test('eap_report is local measured summary only (no %/$)', async () => {
+  const { dispatch } = harness();
+  await call(dispatch, 1, 'eap_index', { source: 'x', content: 'report body here' });
+  const r = sc(await call(dispatch, 2, 'eap_report', {}));
+  assert.equal(r.docs, 1);
+  assert.ok(r.bytesKeptOut > 0);
+  assert.ok(Array.isArray(r.byKind));
+  assert.match(r.honesty, /Measured/);
+  assert.ok(!('percent' in r) && !('dollars' in r));
+});
+
+test('eap_search multi-query + contentType', async () => {
+  const { dispatch } = harness();
+  await call(dispatch, 1, 'eap_index', {
+    source: 'a.md',
+    content: '# Hello\n\nThe zebra narrative and giraffe notes.\n\n```js\nconst zebra = 1;\n```\n',
+  });
+  const hits = sc(await call(dispatch, 2, 'eap_search', {
+    queries: ['giraffe', 'narrative'], limit: 5,
+  })).hits;
+  assert.ok(hits.length >= 1);
+});
+
+test('eap_batch_execute mixes search items', async () => {
+  const { dispatch } = harness();
+  await call(dispatch, 1, 'eap_index', { source: 'b', content: 'unique-batch-term-99 appears here' });
+  const r = sc(await call(dispatch, 2, 'eap_batch_execute', {
+    scripts: [
+      { script: 'print(2+2)', language: 'python3' },
+      { search: true, query: 'unique-batch-term-99' },
+    ],
+  }));
+  assert.equal(r.count, 2);
+  assert.equal(r.results[1].type, 'search');
+  assert.ok(r.results[1].hits.length >= 1);
 });
 
 test('eap_purge clears a single doc and then the whole store', async () => {
@@ -271,6 +312,25 @@ test('eap_fetch_and_index (injected) indexes and returns a searchable pointer + 
   // The indexed body is now retrievable losslessly.
   const hits = sc(await call(dispatch, 2, 'eap_search', { query: 'timeout', docId: r.pointer })).hits;
   assert.match(hits[0].body, /gateway returned a timeout/);
+});
+
+test('eap_fetch_and_index parallel requests[] + ttl:0', async () => {
+  const stub = async (url) => ({
+    ok: true, status: 200, url, finalUrl: url, contentType: 'text/plain',
+    bytes: 12, truncated: false, cached: false, text: `body for ${url}`,
+  });
+  const { dispatch } = harnessWith({ fetch: stub });
+  const r = sc(await call(dispatch, 1, 'eap_fetch_and_index', {
+    requests: [
+      { url: 'http://example.com/a' },
+      { url: 'http://example.com/b' },
+    ],
+    concurrency: 2,
+    ttl: 0,
+  }));
+  assert.equal(r.count, 2);
+  assert.equal(r.concurrency, 2);
+  assert.ok(r.results.every((x) => x.pointer && x.expiresAt == null));
 });
 
 test('eap_session_restore surfaces project memory pointers via the injected probe', async () => {

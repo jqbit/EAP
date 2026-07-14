@@ -1,0 +1,2 @@
+description = "EAP-Signal one-line PR review comments"
+prompt = "Review current changes in EAP-Signal style. One line per finding: L<line>: <severity> <problem>. <fix>. No praise, no preamble."

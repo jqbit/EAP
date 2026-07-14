@@ -3,11 +3,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   RuntimeStore, chunk, OFFLOAD_THRESHOLD_BYTES, probeSqlite, tokenize, STOPWORDS,
+  looksLikeMarkdown, contentHash, editDistance, classifyContentKind,
+  DEFAULT_INDEX_TTL_MS, resetSearchThrottle,
 } from '../layers/eap-runtime/src/store.mjs';
 
 test('concurrent processes can initialize the same on-disk store', async () => {
@@ -226,4 +228,81 @@ test('file-backed store enables WAL + busy_timeout so concurrent multi-agent ope
     b.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('markdown chunking preserves fenced blocks and splits on headings', () => {
+  const md = [
+    '# Intro',
+    'Some prose here about the API.',
+    '',
+    '```js',
+    'const x = 1;',
+    'function keepMeWhole() { return x; }',
+    '```',
+    '',
+    '## Details',
+    'More prose under the second heading.',
+  ].join('\n');
+  assert.equal(looksLikeMarkdown(md), true);
+  const parts = chunk(md, 500);
+  assert.ok(parts.some((p) => p.includes('```js') && p.includes('keepMeWhole')));
+  assert.ok(parts.some((p) => /^# Intro/m.test(p) || p.includes('# Intro')));
+  assert.ok(parts.some((p) => p.includes('## Details') || p.includes('More prose under')));
+});
+
+test('contentType filter and multi-query + proximity search', () => {
+  const s = new RuntimeStore(':memory:');
+  s.index('code.js', 'function paymentGateway() { return charge(user); }\n\n// end');
+  s.index('notes.md', '# Story\n\nThe payment narrative explains why users care about latency.');
+  const codeHits = s.search('payment', { contentType: 'code', limit: 5 });
+  assert.ok(codeHits.every((h) => classifyContentKind(h.body) !== 'prose' || /function|return/.test(h.body)));
+  const multi = s.search('', { queries: ['gateway', 'narrative'], limit: 5 });
+  assert.ok(multi.length >= 1);
+  const prox = s.search('payment latency', { proximity: true, limit: 5 });
+  assert.ok(prox.length >= 1);
+  s.close();
+});
+
+test('fuzzy correction recovers near-miss zero-hit queries', () => {
+  const s = new RuntimeStore(':memory:');
+  s.index('doc', 'the payments module handles refunds carefully');
+  const miss = s.search('paymants refunds', { fuzzy: true });
+  assert.ok(miss.length >= 1, 'fuzzy should correct paymants→payments');
+  s.close();
+});
+
+test('stale flag when path content_hash diverges', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'eap-stale-'));
+  const file = join(dir, 'tracked.txt');
+  writeFileSync(file, 'version one body unique-alpha');
+  const s = new RuntimeStore(':memory:');
+  s.index(file, 'version one body unique-alpha', { path: file });
+  const fresh = s.search('unique-alpha', { checkStale: true });
+  assert.equal(fresh[0].stale, false);
+  writeFileSync(file, 'version two body unique-alpha');
+  const stale = s.search('unique-alpha', { checkStale: true });
+  assert.equal(stale[0].stale, true);
+  assert.equal(stale[0].staleReason, 'changed');
+  s.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('TTL expiry cleanup and report measured fields', () => {
+  const s = new RuntimeStore(':memory:');
+  s.index('fetch:a', 'ttl body alpha ' + 'x'.repeat(20), { createdAt: 1000, now: 1000, ttlMs: 500 });
+  s.index('keep', 'persistent body beta', { createdAt: 1000, ttlMs: 0 });
+  assert.equal(s.stats().docs, 2);
+  const purged = s.purgeExpired({ now: 2000 });
+  assert.equal(purged.removedDocs, 1);
+  assert.equal(s.stats().docs, 1);
+  const rep = s.report({ now: 2000 });
+  assert.equal(rep.docs, 1);
+  assert.ok(Array.isArray(rep.byKind));
+  assert.match(rep.honesty, /Measured/);
+  assert.ok(!('percent' in rep) && !('dollars' in rep));
+  assert.ok(DEFAULT_INDEX_TTL_MS >= 24 * 60 * 60 * 1000);
+  assert.equal(editDistance('kitten', 'sitting'), 3);
+  assert.equal(contentHash('a'), contentHash('a'));
+  resetSearchThrottle();
+  s.close();
 });

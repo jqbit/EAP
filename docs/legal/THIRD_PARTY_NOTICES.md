@@ -45,7 +45,44 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## caveman — via EAP-Signal (through TLDR)
+## caveman + TLDR — EAP-Signal suite (skills, shrink, init, hooks)
+
+EAP-Signal's always-on rule descends from TLDR → caveman (MIT). The user-facing
+suite under `layers/eap-signal/` (skills, eapcrew agents, commands,
+`mcp-servers/eap-signal-shrink/`, plus `src/tools/eap-signal-init.mjs`,
+`src/hooks/eap-signal-stats.mjs`, `src/hooks/eapcrew-model-overrides.mjs`)
+adapts substantial TLDR and caveman source. Notices retained:
+
+- Project: `TLDR` — Author: ZeroPointNineBar — https://github.com/0point9bar/TLDR
+- Project: `caveman` — Author: Julius Brussee — https://github.com/JuliusBrussee/caveman
+
+```
+MIT License
+
+Copyright (c) 2026 Julius Brussee
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+(TLDR MIT notice — same license terms — also applies to adapted `tldr-*` files.)
+
+## caveman — via EAP-Signal (through TLDR) [legacy section kept]
 
 EAP-Signal descends from TLDR, whose installer/skill machinery is in turn
 caveman-derived (MIT). Where that lineage carries substantial portions,

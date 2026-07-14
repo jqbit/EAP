@@ -94,8 +94,14 @@ test('Claude reinstall refreshes stale EAP dispatcher paths instead of keeping a
     const settings = readFileSync(join(dir, 'settings.json'), 'utf8');
     assert.doesNotMatch(settings, /\/old\/checkout\/EAP/);
     assert.match(settings, /eap-dispatch\.mjs/);
-    assert.equal((settings.match(/eap-dispatch\.mjs/g) || []).length, 6,
-      'one current dispatcher hook per lifecycle event');
+    // command + commandWindows each mention the script → 2 × N events.
+    const nEvents = 7; // SessionStart, UserPromptSubmit, SubagentStart, Pre/PostToolUse, PreCompact, Stop
+    assert.equal((settings.match(/eap-dispatch\.mjs/g) || []).length, nEvents * 2,
+      'command + commandWindows per lifecycle event');
+    const parsed = JSON.parse(settings);
+    for (const ev of ['SessionStart', 'UserPromptSubmit', 'SubagentStart', 'PreToolUse', 'PostToolUse', 'PreCompact', 'Stop']) {
+      assert.ok(parsed.hooks[ev], `hook ${ev} present after reinstall`);
+    }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -129,13 +135,25 @@ test('real --only claude install lands Signal block + both MCP entries + hooks, 
     // 3. Hooks wired for all lifecycle events (UserPromptSubmit drives the
     //    /eap lean|signal level switches).
     const settings = JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8'));
-    for (const ev of ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PreCompact', 'Stop']) {
+    for (const ev of ['SessionStart', 'UserPromptSubmit', 'SubagentStart', 'PreToolUse', 'PostToolUse', 'PreCompact', 'Stop']) {
       assert.ok(settings.hooks[ev], `hook event ${ev} present`);
     }
     assert.match(settings.statusLine.command, /eap-statusline/);   // statusline claimed
     const dump = JSON.stringify(settings);
     assert.match(dump, /eap-dispatch/);
+    assert.match(dump, /commandWindows/);          // Windows PowerShell companions
     assert.match(dump, /USER-HOOK/);               // user hook preserved alongside ours
+    // Every managed hook commandWindows uses PowerShell $env: / Get-Command — never cmd %VAR%.
+    for (const ev of Object.keys(settings.hooks)) {
+      for (const entry of settings.hooks[ev]) {
+        for (const h of entry.hooks || []) {
+          if (h.command && h.command.includes('eap-dispatch')) {
+            assert.ok(h.commandWindows, `${ev} missing commandWindows`);
+            assert.doesNotMatch(h.commandWindows, /%[A-Z_]+%/);
+          }
+        }
+      }
+    }
 
     // Layer-flags file for the dispatcher.
     const flags = JSON.parse(readFileSync(join(dir, '.eap.json'), 'utf8'));
@@ -143,11 +161,16 @@ test('real --only claude install lands Signal block + both MCP entries + hooks, 
     assert.equal(flags.context, true);
     assert.equal(flags.signalStatic, true);        // hook must not re-inject Signal
 
-    // EAP-Lean + EAP-Runtime skills installed + discoverable.
-    for (const s of ['eap-lean-review', 'eap-lean-audit', 'eap-lean-debt', 'eap-lean-gain', 'eap-lean-help',
-      'eap-stats', 'eap-search', 'eap-doctor', 'eap-purge']) {
+    // EAP-Lean + EAP-Runtime skills installed + discoverable (incl. eap-update).
+    for (const s of ['eap-lean', 'eap-lean-review', 'eap-lean-audit', 'eap-lean-debt', 'eap-lean-gain', 'eap-lean-help',
+      'eap-stats', 'eap-search', 'eap-doctor', 'eap-purge',
+      'eap-runtime', 'eap-index', 'eap-upgrade', 'eap-update']) {
       assert.ok(existsSync(join(dir, 'skills', s, 'SKILL.md')), `${s} skill installed`);
     }
+    assert.ok(existsSync(join(dir, 'skills', 'eap-runtime', 'references', 'routing.md')));
+    // /eap-update slash command (+ toml companion).
+    assert.ok(existsSync(join(dir, 'commands', 'eap-update.md')), '/eap-update command installed');
+    assert.ok(existsSync(join(dir, 'commands', 'eap-update.toml')), 'eap-update.toml installed');
 
     // ── uninstall ──
     const u = run(['--uninstall', '--config-dir', dir, '--non-interactive', '--no-color']);
@@ -168,10 +191,12 @@ test('real --only claude install lands Signal block + both MCP entries + hooks, 
     assert.ok(!(mcp2.mcpServers && mcp2.mcpServers['eap-context']), 'eap-context removed');
 
     assert.ok(!existsSync(join(dir, '.eap.json')), '.eap.json removed on uninstall');
-    for (const s of ['eap-lean-review', 'eap-lean-audit', 'eap-lean-debt', 'eap-lean-gain', 'eap-lean-help',
-      'eap-stats', 'eap-search', 'eap-doctor', 'eap-purge']) {
+    for (const s of ['eap-lean', 'eap-lean-review', 'eap-lean-audit', 'eap-lean-debt', 'eap-lean-gain', 'eap-lean-help',
+      'eap-stats', 'eap-search', 'eap-doctor', 'eap-purge',
+      'eap-runtime', 'eap-index', 'eap-upgrade', 'eap-update']) {
       assert.ok(!existsSync(join(dir, 'skills', s, 'SKILL.md')), `${s} skill removed on uninstall`);
     }
+    assert.ok(!existsSync(join(dir, 'commands', 'eap-update.md')), '/eap-update removed on uninstall');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -224,7 +249,7 @@ test('a planted CLAUDE.md symlink is not followed (atomic write, symlink-safe)',
 // always-on rules file. Every run is fully env-sandboxed (HOME / XDG_CONFIG_HOME
 // / HERMES_HOME / CLAUDE_CONFIG_DIR all point into a throwaway dir) so the real
 // user's ~/.codex, ~/.grok, etc. are NEVER touched.
-const NATIVE_AGENTS = ['codex', 'opencode', 'pi', 'grok', 'antigravity', 'hermes'];
+const NATIVE_AGENTS = ['codex', 'opencode', 'pi', 'grok', 'antigravity', 'hermes', 'cursor', 'windsurf', 'cline'];
 
 // Sandbox env for a throwaway HOME. Isolates every path the native resolver uses.
 function sandboxEnv(home) {
@@ -255,7 +280,25 @@ function nativePath(id, env) {
     case 'grok':        return join(env.HOME, '.grok', 'AGENTS.md');
     case 'antigravity': return join(env.HOME, '.gemini', 'config', 'AGENTS.md');
     case 'hermes':      return join(env.HERMES_HOME, 'SOUL.md');
+    case 'cursor':      return join(env.HOME, '.cursor', 'rules', 'eap.mdc');
+    case 'windsurf':    return join(env.HOME, '.windsurf', 'rules', 'eap.md');
+    case 'cline':       return join(env.HOME, 'Documents', 'Cline', 'Rules', 'eap.md');
     default: throw new Error(`no native path for ${id}`);
+  }
+}
+
+function nativeSkillsRoot(id, env) {
+  switch (id) {
+    case 'codex':       return join(env.HOME, '.codex', 'skills');
+    case 'opencode':    return join(env.XDG_CONFIG_HOME, 'opencode', 'skills');
+    case 'pi':          return join(env.HOME, '.pi', 'agent', 'skills');
+    case 'grok':        return join(env.HOME, '.grok', 'skills');
+    case 'antigravity': return join(env.HOME, '.gemini', 'config', 'skills');
+    case 'hermes':      return join(env.HERMES_HOME, 'skills', 'productivity');
+    case 'cursor':      return join(env.HOME, '.cursor', 'skills');
+    case 'windsurf':    return join(env.HOME, '.windsurf', 'skills');
+    case 'cline':       return null; // rules only
+    default: return null;
   }
 }
 
@@ -327,24 +370,100 @@ for (const id of NATIVE_AGENTS) {
   });
 }
 
-test('native EAP-Signal: --only cursor writes NO global file, exits 0, prints the per-repo note', () => {
+test('native EAP-Signal: --only cursor writes ~/.cursor/rules/eap.mdc with alwaysApply frontmatter', () => {
   const home = mkTmp('nat-cursor');
   const env = sandboxEnv(home);
   try {
     const r = run(['--only', 'cursor', '--non-interactive', '--no-color'], { env });
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /per-repo/i);
-    assert.match(r.stdout, /cursor/i);
-    // Reported as handled (installed list), not planned.
     assert.doesNotMatch(r.stdout, /PLANNED/);
-    // No global AGENTS.md / rules file created anywhere in the sandbox.
-    const stray = [
-      join(env.HOME, 'AGENTS.md'),
-      join(env.HOME, '.cursor', 'AGENTS.md'),
-      join(env.XDG_CONFIG_HOME, 'cursor', 'AGENTS.md'),
-    ];
-    for (const p of stray) assert.ok(!existsSync(p), `cursor must not write global ${p}`);
+    const file = nativePath('cursor', env);
+    assert.ok(existsSync(file), 'cursor rules file');
+    const txt = readFileSync(file, 'utf8');
+    assert.match(txt, /^---\n/);
+    assert.match(txt, /alwaysApply: true/);
+    assert.match(txt, /<!-- eap-signal:begin -->/);
+    assert.match(txt, /<!-- eap-lean:begin -->/);
+    assert.ok(existsSync(join(nativeSkillsRoot('cursor', env), 'eap-signal', 'SKILL.md')));
+    assert.ok(existsSync(join(nativeSkillsRoot('cursor', env), 'eap-lean', 'SKILL.md')));
   } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('native skills: codex + hermes land Signal+Lean SKILL.md trees; hermes uses productivity/', () => {
+  const home = mkTmp('nat-skills');
+  const env = sandboxEnv(home);
+  try {
+    assert.equal(run(['--only', 'codex,hermes', '--non-interactive', '--no-color'], { env }).status, 0);
+    assert.ok(existsSync(join(nativeSkillsRoot('codex', env), 'eap-signal', 'SKILL.md')));
+    assert.ok(existsSync(join(nativeSkillsRoot('codex', env), 'eap-lean-review', 'SKILL.md')));
+    assert.ok(existsSync(join(nativeSkillsRoot('hermes', env), 'eap-signal', 'SKILL.md')));
+    assert.ok(existsSync(join(nativeSkillsRoot('hermes', env), 'eapcrew', 'SKILL.md')));
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('native opencode: installs commands + eapcrew agents alongside AGENTS.md', () => {
+  const home = mkTmp('nat-oc-cmds');
+  const env = sandboxEnv(home);
+  try {
+    assert.equal(run(['--only', 'opencode', '--non-interactive', '--no-color'], { env }).status, 0);
+    const cmds = join(env.XDG_CONFIG_HOME, 'opencode', 'commands');
+    const agents = join(env.XDG_CONFIG_HOME, 'opencode', 'agents');
+    const skills = join(env.XDG_CONFIG_HOME, 'opencode', 'skills');
+    assert.ok(existsSync(join(cmds, 'eap-signal.md')));
+    assert.ok(existsSync(join(cmds, 'eap-update.md')), '/eap-update command on opencode');
+    assert.ok(existsSync(join(cmds, 'eap-update.toml')));
+    assert.ok(existsSync(join(agents, 'eapcrew-investigator.md')));
+    assert.ok(existsSync(join(skills, 'eap-update', 'SKILL.md')), 'eap-update skill on opencode');
+    assert.ok(existsSync(join(skills, 'eap-signal', 'SKILL.md')));
+    assert.ok(existsSync(join(skills, 'eap-lean', 'SKILL.md')));
+    // Uninstall strips the update skill + command from the native tree.
+    assert.equal(run(['--uninstall', '--non-interactive', '--no-color'], { env }).status, 0);
+    assert.ok(!existsSync(join(skills, 'eap-update', 'SKILL.md')));
+    assert.ok(!existsSync(join(cmds, 'eap-update.md')));
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('native skills: eap-update lands on codex with runtime; skipped under --no-runtime', () => {
+  const homeOn = mkTmp('nat-upd-on');
+  const envOn = sandboxEnv(homeOn);
+  try {
+    assert.equal(run(['--only', 'codex', '--non-interactive', '--no-color'], { env: envOn }).status, 0);
+    assert.ok(existsSync(join(nativeSkillsRoot('codex', envOn), 'eap-update', 'SKILL.md')));
+  } finally { rmSync(homeOn, { recursive: true, force: true }); }
+  const homeOff = mkTmp('nat-upd-off');
+  const envOff = sandboxEnv(homeOff);
+  try {
+    assert.equal(run(['--only', 'codex', '--non-interactive', '--no-color', '--no-runtime'], { env: envOff }).status, 0);
+    assert.ok(!existsSync(join(nativeSkillsRoot('codex', envOff), 'eap-update', 'SKILL.md')),
+      'eap-update gated by --no-runtime on native hosts');
+    assert.ok(existsSync(join(nativeSkillsRoot('codex', envOff), 'eap-signal', 'SKILL.md')));
+  } finally { rmSync(homeOff, { recursive: true, force: true }); }
+});
+
+test('native gemini: writes ~/.gemini/extensions/eap with gemini-extension.json + GEMINI.md', () => {
+  const home = mkTmp('nat-gemini');
+  const env = sandboxEnv(home);
+  try {
+    const r = run(['--only', 'gemini', '--non-interactive', '--no-color'], { env });
+    assert.equal(r.status, 0, r.stderr);
+    const dir = join(env.HOME, '.gemini', 'extensions', 'eap');
+    assert.ok(existsSync(join(dir, 'gemini-extension.json')));
+    const md = readFileSync(join(dir, 'GEMINI.md'), 'utf8');
+    assert.match(md, /<!-- eap-signal:begin -->/);
+    assert.match(md, /<!-- eap-lean:begin -->/);
+    const u = run(['--uninstall', '--non-interactive', '--no-color'], { env });
+    assert.equal(u.status, 0, u.stderr);
+    assert.ok(!existsSync(dir), 'gemini extension removed on uninstall');
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('--list shows gemini/windsurf/cline as wired (not planned) and copilot still planned', () => {
+  const r = run(['--list', '--no-color']);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /gemini\s+.*signal \+ lean \(gemini ext\)/);
+  assert.match(r.stdout, /windsurf\s+.*signal \+ lean/);
+  assert.match(r.stdout, /cline\s+.*signal \+ lean/);
+  assert.match(r.stdout, /copilot\s+.*planned/);
 });
 
 // ── native MCP registration (the 6 MCP-capable native agents) ────────────────

@@ -201,6 +201,11 @@ export function addCommandHook(settings, event, opts) {
     // current; otherwise hooks keep executing an old checkout forever.
     hook.type = 'command';
     hook.command = opts.command;
+    if (typeof opts.commandWindows === 'string' && opts.commandWindows) {
+      hook.commandWindows = opts.commandWindows;
+    } else {
+      delete hook.commandWindows;
+    }
     if (typeof opts.timeout === 'number') hook.timeout = opts.timeout;
     else delete hook.timeout;
     if (typeof opts.matcher === 'string' && opts.matcher) entry.matcher = opts.matcher;
@@ -208,6 +213,9 @@ export function addCommandHook(settings, event, opts) {
     return false;
   }
   const hook = { type: 'command', command: opts.command };
+  if (typeof opts.commandWindows === 'string' && opts.commandWindows) {
+    hook.commandWindows = opts.commandWindows;
+  }
   if (typeof opts.timeout === 'number') hook.timeout = opts.timeout;
   const entry = { hooks: [hook] };
   if (typeof opts.matcher === 'string' && opts.matcher) entry.matcher = opts.matcher;

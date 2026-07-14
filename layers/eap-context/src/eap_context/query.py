@@ -320,6 +320,30 @@ def _select_seeds(scored: list[tuple[float, str]], token_best: dict[str, tuple])
 # ---------------------------------------------------------------------------
 
 
+def _pack_token_budget(pointers: list[str], nodes_out: list[dict],
+                       edges: list[dict], budget: int | None) -> tuple:
+    """Trim result lists so roughly ``budget`` tokens remain (~chars/4).
+
+    Heuristic only — never a billed tokenizer. Returns (pointers, nodes, edges,
+    packed_bool).
+    """
+    if budget is None or budget <= 0:
+        return pointers, nodes_out, edges, False
+    # Keep dropping from the end until the JSON-ish payload fits.
+    def _est(p, n, e) -> int:
+        return max(1, (sum(len(x) for x in p) + 40 * len(n) + 30 * len(e)) // 4)
+
+    packed = False
+    while len(pointers) > 1 and _est(pointers, nodes_out, edges) > budget:
+        pointers = pointers[:-1]
+        nodes_out = nodes_out[:-1]
+        keep = {n["id"] for n in nodes_out}
+        edges = [e for e in edges
+                 if e["source"] in keep and e["target"] in keep]
+        packed = True
+    return pointers, nodes_out, edges, packed
+
+
 def query(
     g: SymbolGraph,
     text: str,
@@ -327,13 +351,20 @@ def query(
     limit: int = DEFAULT_LIMIT,
     degree_cap: int | None = None,
     tags: dict[str, str] | None = None,
+    mode: str = "bfs",
+    token_budget: int | None = None,
 ) -> dict:
     """Answer *text* with a compact subgraph + file:line pointers.
 
     *tags* is the optional reflect overlay ({node_id: "preferred"|"contested"},
     see reflect.py): applied as a multiplier on seed scores before selection,
     so a preferred node wins close calls and a contested one loses them.
+
+    *mode* is ``bfs`` (default) or ``dfs`` for the expansion walk. *token_budget*
+    optionally packs the result to an approximate token ceiling (chars/4).
     """
+    if mode not in ("bfs", "dfs"):
+        mode = "bfs"
     cap = god_node_threshold(g) if degree_cap is None else degree_cap
     scored, token_best = _seed_scores_detailed(g, text)
     if tags:
@@ -346,9 +377,13 @@ def query(
     chosen: list[str] = []
     seen: set[str] = set()
     truncated = False
+    # deque: popleft = BFS; list+pop = DFS. Same push of (nid, dist).
     frontier: deque[tuple[str, int]] = deque((s, 0) for s in seeds)
     while frontier:
-        nid, dist = frontier.popleft()
+        if mode == "dfs":
+            nid, dist = frontier.pop()
+        else:
+            nid, dist = frontier.popleft()
         if nid in seen:
             continue
         seen.add(nid)
@@ -360,7 +395,9 @@ def query(
             continue
         if g.degree(nid) > cap and nid not in seeds:
             continue  # god node: keep it, do not fan out through it
-        for nb in g.neighbors(nid):
+        nbrs = g.neighbors(nid)
+        # DFS pushes reverse-sorted so lexicographically-first expands first.
+        for nb in (reversed(nbrs) if mode == "dfs" else nbrs):
             if nb not in seen:
                 frontier.append((nb, dist + 1))
 
@@ -383,16 +420,21 @@ def query(
         f"{g.pointer(nid)}  {g.nodes[nid]['name']} [{g.nodes[nid]['kind']}]"
         for nid in chosen
     ]
+    pointers, nodes_out, sub_edges, packed = _pack_token_budget(
+        pointers, nodes_out, sub_edges, token_budget)
     return {
         "query": text,
         "depth": depth,
         "limit": limit,
         "degree_cap": cap,
+        "mode": mode,
         "seeds": seeds,
         "nodes": nodes_out,
         "edges": sub_edges,
         "pointers": pointers,
-        "truncated": truncated,
+        "truncated": truncated or packed,
+        "token_budget": token_budget,
+        "packed": packed,
     }
 
 
@@ -415,28 +457,162 @@ def resolve_node(g: SymbolGraph, ref: str) -> str | None:
     return None
 
 
-def neighbors(g: SymbolGraph, ref: str, direction: str = "both") -> dict:
+def neighbors(g: SymbolGraph, ref: str, direction: str = "both",
+              mode: str = "bfs", depth: int = 1,
+              limit: int = DEFAULT_LIMIT) -> dict:
+    """Edges around one symbol, optionally expanded via BFS/DFS to *depth*."""
     nid = resolve_node(g, ref)
     if nid is None:
         return {"node": None, "error": f"no symbol matching {ref!r}"}
-    edges = g.neighbor_edges(nid, direction)
-    out = []
-    for e in edges:
-        other = e["target"] if e["source"] == nid else e["source"]
-        arrow = "->" if e["source"] == nid else "<-"
-        out.append({
-            "direction": arrow,
-            "relation": e["relation"],
-            "provenance": e["provenance"],
-            "id": other,
-            "name": g.nodes[other]["name"],
-            "kind": g.nodes[other]["kind"],
-            "pointer": g.pointer(other),
-        })
+    if mode not in ("bfs", "dfs"):
+        mode = "bfs"
+    depth = max(1, int(depth))
+    if depth == 1 and mode == "bfs":
+        edges = g.neighbor_edges(nid, direction)
+        out = []
+        for e in edges:
+            other = e["target"] if e["source"] == nid else e["source"]
+            arrow = "->" if e["source"] == nid else "<-"
+            out.append({
+                "direction": arrow,
+                "relation": e["relation"],
+                "provenance": e["provenance"],
+                "id": other,
+                "name": g.nodes[other]["name"],
+                "kind": g.nodes[other]["kind"],
+                "pointer": g.pointer(other),
+            })
+        return {
+            "node": {"id": nid, **g.nodes[nid], "degree": g.degree(nid),
+                     "pointer": g.pointer(nid)},
+            "neighbors": out,
+            "mode": mode,
+            "depth": depth,
+        }
+    # Multi-hop walk
+    chosen: list[str] = []
+    seen: set[str] = {nid}
+    frontier: deque[tuple[str, int]] = deque([(nid, 0)])
+    while frontier and len(chosen) < limit:
+        if mode == "dfs":
+            cur, dist = frontier.pop()
+        else:
+            cur, dist = frontier.popleft()
+        if cur != nid:
+            chosen.append(cur)
+        if dist >= depth:
+            continue
+        for e in g.neighbor_edges(cur, direction):
+            other = e["target"] if e["source"] == cur else e["source"]
+            if other not in seen:
+                seen.add(other)
+                frontier.append((other, dist + 1))
     return {
         "node": {"id": nid, **g.nodes[nid], "degree": g.degree(nid),
                  "pointer": g.pointer(nid)},
-        "neighbors": out,
+        "neighbors": [
+            {"id": o, "name": g.nodes[o]["name"], "kind": g.nodes[o]["kind"],
+             "pointer": g.pointer(o), "degree": g.degree(o)}
+            for o in chosen
+        ],
+        "mode": mode,
+        "depth": depth,
+        "limit": limit,
+    }
+
+
+def get_node(g: SymbolGraph, ref: str) -> dict:
+    """Single-node card: metadata, degree, community, sample edges."""
+    nid = resolve_node(g, ref)
+    if nid is None:
+        return {"node": None, "error": f"no symbol matching {ref!r}"}
+    n = g.nodes[nid]
+    edges = g.neighbor_edges(nid, "both")
+    sample = []
+    for e in edges[:20]:
+        other = e["target"] if e["source"] == nid else e["source"]
+        sample.append({
+            "direction": "->" if e["source"] == nid else "<-",
+            "relation": e["relation"],
+            "provenance": e.get("provenance", ""),
+            "id": other,
+            "name": g.nodes[other]["name"],
+            "pointer": g.pointer(other),
+        })
+    return {
+        "node": {
+            "id": nid, **n, "degree": g.degree(nid),
+            "pointer": g.pointer(nid),
+            "community": n.get("community"),
+        },
+        "edge_count": len(edges),
+        "edges": sample,
+    }
+
+
+def explain(g: SymbolGraph, ref: str, root: str | None = None) -> dict:
+    """Why a node matters: degree, community, relation histogram, sample callers."""
+    card = get_node(g, ref)
+    if card.get("node") is None:
+        return card
+    nid = card["node"]["id"]
+    rel_hist: dict[str, int] = {}
+    callers, callees = [], []
+    for e in g.neighbor_edges(nid, "both"):
+        rel_hist[e["relation"]] = rel_hist.get(e["relation"], 0) + 1
+        other = e["target"] if e["source"] == nid else e["source"]
+        line = f"{g.pointer(other)}  {g.nodes[other]['name']}"
+        if e["target"] == nid:
+            callers.append(line)
+        else:
+            callees.append(line)
+    why = []
+    deg = g.degree(nid)
+    thr = god_node_threshold(g)
+    if deg >= thr:
+        why.append(f"hub: degree {deg} >= god-node threshold {thr}")
+    if card["node"].get("community") is not None:
+        why.append(f"community {card['node']['community']}")
+    if rel_hist.get("inherits") or rel_hist.get("implements"):
+        why.append("participates in type hierarchy")
+    if rel_hist.get("depends_on"):
+        why.append("manifest dependency edge")
+    if not why:
+        why.append("ordinary symbol; inspect edges for coupling")
+    return {
+        **card,
+        "relations": rel_hist,
+        "callers": callers[:10],
+        "callees": callees[:10],
+        "why": why,
+    }
+
+
+def get_community(g: SymbolGraph, community_id: int,
+                  root: str | None = None) -> dict:
+    """Members of one community (from node stamps or communities.json)."""
+    members = sorted(
+        nid for nid, n in g.nodes.items()
+        if n.get("community") == community_id
+    )
+    if not members and root is not None:
+        from . import graph as graph_mod
+        mapping = graph_mod.load_communities(root)
+        members = sorted(nid for nid, cid in mapping.items()
+                         if cid == community_id and nid in g.nodes)
+        for nid in members:
+            g.nodes[nid]["community"] = community_id
+    return {
+        "id": community_id,
+        "size": len(members),
+        "members": [
+            {"id": nid, **g.nodes[nid], "pointer": g.pointer(nid)}
+            for nid in members
+        ],
+        "pointers": [
+            f"{g.pointer(nid)}  {g.nodes[nid]['name']} [{g.nodes[nid]['kind']}]"
+            for nid in members
+        ],
     }
 
 

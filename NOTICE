@@ -26,7 +26,8 @@ documentation/code derivatives whose notices are retained):
     Anthropic's "code execution with MCP"). It contains NO context-mode source.
 
   * caveman (MIT, Julius Brussee), TLDR (MIT, ZeroPointNineBar), ponytail (MIT, Dietrich
-    Gebert) — EAP-Signal descends from TLDR (which credits caveman); ponytail's
-    code-brevity concept is an optional Signal sub-mode. No ponytail code taken.
+    Gebert) — EAP-Signal descends from TLDR (which credits caveman); EAP-Lean is
+    a documentation + examples/bench derivative of ponytail (MIT ports). EAP does
+    not vendor ponytail's hook runtime (reimplemented under src/hooks/).
 
 See docs/legal/ATTRIBUTION.md for the full record and the clean-room guard.

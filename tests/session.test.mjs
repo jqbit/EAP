@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   SessionLog, buildSnapshot, tierOf, classifyError, EVENT_KINDS, SNAPSHOT_MAX_BYTES,
+  extractSessionEvents, buildSessionGuide, extractEditedFiles, extractGitSummary,
 } from '../layers/eap-runtime/src/session.mjs';
 import { RuntimeStore } from '../layers/eap-runtime/src/store.mjs';
 
@@ -184,5 +185,40 @@ test('restore with no snapshot still surfaces memory pointers when present', () 
   assert.equal(r.ts, null);
   assert.match(r.body, /CLAUDE\.md/);
   assert.deepEqual(r.memory.map((m) => m.name), ['CLAUDE.md']);
+  store.close();
+});
+
+test('extractors capture edits, git, decisions; Session Guide stays measured', () => {
+  assert.deepEqual(
+    extractEditedFiles({ tool_name: 'Edit', tool_input: { file_path: 'src/a.mjs' } }),
+    ['src/a.mjs'],
+  );
+  const git = extractGitSummary({
+    tool_name: 'Bash',
+    tool_input: { command: 'git status -sb' },
+    tool_response: '## main\n M src/a.mjs',
+  });
+  assert.match(git, /git/);
+  const evs = extractSessionEvents({
+    tool_name: 'Write',
+    tool_input: { path: 'x.md' },
+    tool_response: 'DECISION: use FTS fusion\nError: boom failed',
+  });
+  assert.ok(evs.some((e) => e.kind === 'file_edit'));
+  assert.ok(evs.some((e) => e.kind === 'decision'));
+  assert.ok(evs.some((e) => e.kind === 'error'));
+
+  const store = new RuntimeStore(':memory:');
+  store.index('a', 'hello bytes');
+  const log = new SessionLog(store);
+  log.appendFromTool({
+    tool_name: 'Edit', tool_input: { file_path: 'f.js' }, tool_response: 'ok',
+  }, { ts: 1 });
+  const snap = log.snapshot({ ts: 2 });
+  assert.match(snap.body, /Session Guide/);
+  assert.match(snap.body, /bytes kept out/);
+  assert.ok(!/[%$]/.test(snap.body), 'no %/$ claims');
+  const guide = buildSessionGuide(log.events(), { stats: store.stats(), maxBytes: 400 });
+  assert.match(guide, /measured/i);
   store.close();
 });

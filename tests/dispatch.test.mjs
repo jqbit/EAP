@@ -5,8 +5,9 @@
 // an in-memory Runtime store/session — no disk, no stdio, deterministic clock.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { dispatch, DEFAULT_OFFLOAD_THRESHOLD, routingDeny, DENY_REASONS } from '../src/hooks/eap-dispatch.mjs';
+import { dispatch, DEFAULT_OFFLOAD_THRESHOLD, routingDeny, routingNudge, DENY_REASONS } from '../src/hooks/eap-dispatch.mjs';
 import { formatStatus } from '../src/hooks/eap-statusline.mjs';
+import { subagentMatcherAllows, parseSwitch } from '../src/hooks/eap-state.mjs';
 import { RuntimeStore } from '../layers/eap-runtime/src/store.mjs';
 import { SessionLog } from '../layers/eap-runtime/src/session.mjs';
 
@@ -81,9 +82,27 @@ test('PreToolUse nudges toward the graph before a large raw read', async () => {
   assert.match(r.additionalContext || '', /eap_graph_query/);
 });
 
-test('PreToolUse stays silent for non-read tools', async () => {
-  const r = await dispatch('PreToolUse', { tool_name: 'Bash' }, { contextAvailable: true });
+test('PreToolUse stays silent for harmless Bash', async () => {
+  const r = await dispatch('PreToolUse', { tool_name: 'Bash', tool_input: { command: 'ls -la' } }, { contextAvailable: true });
   assert.ok(!r.additionalContext);
+});
+
+test('PreToolUse nudges WebFetch and curl Bash toward eap_fetch', async () => {
+  const wf = await dispatch('PreToolUse', { tool_name: 'WebFetch' }, {});
+  assert.match(wf.additionalContext || '', /eap_fetch/);
+  const curl = await dispatch('PreToolUse',
+    { tool_name: 'Bash', tool_input: { command: 'curl https://example.com' } }, {});
+  assert.match(curl.additionalContext || '', /eap_fetch/);
+  assert.ok(routingNudge({ tool_name: 'WebFetch' }));
+});
+
+test('PostToolUse logs file_edit via session extractors', async () => {
+  const runtime = mkRuntime();
+  await dispatch('PostToolUse',
+    { tool_name: 'Edit', tool_input: { file_path: '/tmp/x.js' }, tool_response: 'applied' },
+    { runtime, now: () => 11 });
+  assert.ok(runtime.session.events().some((e) => e.kind === 'file_edit' && /x\.js/.test(e.summary)));
+  runtime.store.close();
 });
 
 test('Stop records a turn-end event in the session log', async () => {
@@ -143,6 +162,60 @@ test('statusline formatter: levels + measured bytes only, no %/$', () => {
   const line = formatStatus({ signal: 'lite', lean: 'full', bytesKeptOut: 12345, docs: 2 });
   assert.equal(line, 'EAP Signal:lite Lean:full | 12,345 bytes kept out of context (2 docs)');
   assert.ok(!/[%$]/.test(line));
+});
+
+test('SubagentStart injects Signal+Lean rules when active', async () => {
+  const r = await dispatch('SubagentStart', { agent_type: 'general' }, {
+    signalRules: 'SIG-BODY', leanRules: 'LEAN-BODY',
+    readMode: () => 'full',
+    subagentMatcherAllows,
+  });
+  assert.match(r.additionalContext, /SIG-BODY/);
+  assert.match(r.additionalContext, /LEAN-BODY/);
+});
+
+test('SubagentStart respects EAP_SUBAGENT_MATCHER scoping', async () => {
+  const prev = process.env.EAP_SUBAGENT_MATCHER;
+  process.env.EAP_SUBAGENT_MATCHER = 'general|plan';
+  try {
+    const miss = await dispatch('SubagentStart', { agent_type: 'Explore' }, {
+      signalRules: 'S', leanRules: 'L', readMode: () => 'full', subagentMatcherAllows,
+    });
+    assert.ok(!miss.additionalContext);
+    const hit = await dispatch('SubagentStart', { agent_type: 'general' }, {
+      signalRules: 'S', leanRules: 'L', readMode: () => 'full', subagentMatcherAllows,
+    });
+    assert.match(hit.additionalContext, /S/);
+  } finally {
+    if (prev === undefined) delete process.env.EAP_SUBAGENT_MATCHER;
+    else process.env.EAP_SUBAGENT_MATCHER = prev;
+  }
+});
+
+test('SubagentStart EAP_LEAN_SUBAGENT_MATCHER can skip Lean only', async () => {
+  const prev = process.env.EAP_LEAN_SUBAGENT_MATCHER;
+  process.env.EAP_LEAN_SUBAGENT_MATCHER = '^general$';
+  try {
+    const r = await dispatch('SubagentStart', { agent_type: 'Explore' }, {
+      signalRules: 'SIG', leanRules: 'LEAN', readMode: () => 'full', subagentMatcherAllows,
+    });
+    assert.match(r.additionalContext, /SIG/);
+    assert.doesNotMatch(r.additionalContext, /LEAN/);
+  } finally {
+    if (prev === undefined) delete process.env.EAP_LEAN_SUBAGENT_MATCHER;
+    else process.env.EAP_LEAN_SUBAGENT_MATCHER = prev;
+  }
+});
+
+test('UserPromptSubmit /eap lean default persists via writeDefaultMode', async () => {
+  const calls = [];
+  const r = await dispatch('UserPromptSubmit', { prompt: '/eap lean default ultra' }, {
+    parseSwitch,
+    writeDefaultMode: (k, m) => { calls.push([k, m]); return m; },
+  });
+  assert.deepEqual(calls, [['lean', 'ultra']]);
+  assert.match(r.additionalContext, /DEFAULT SET/);
+  assert.match(r.additionalContext, /ultra/);
 });
 
 test('silent-fail: bad input / missing deps never throw, always return { event }', async () => {

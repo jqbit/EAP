@@ -12,18 +12,46 @@ a number, measure it (see `results/README.md` for the schema and the honesty
 rules). Structure adapted from the upstream project EAP-Lean derives from
 (MIT; see `../../../docs/legal/ATTRIBUTION.md`).
 
-## Run (Claude, via promptfoo)
+## Run (Claude / GPT / Gemini, via promptfoo)
 
-Requires an Anthropic API key and **Node.js >= 22**:
+Requires the matching API key and **Node.js >= 22**:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
 cd layers/eap-lean/bench
+export ANTHROPIC_API_KEY=sk-ant-...   # Claude
 npx promptfoo@latest eval -c promptfooconfig.yaml --repeat 10
+
+export OPENAI_API_KEY=sk-...          # GPT
+npx promptfoo@latest eval -c promptfooconfig.gpt.yaml --repeat 10
+npx promptfoo@latest eval -c promptfooconfig.gpt-newest.yaml --repeat 10
+
+export GOOGLE_API_KEY=...             # Gemini
+npx promptfoo@latest eval -c promptfooconfig.gemini.yaml --repeat 10
+
 npx promptfoo@latest view
 ```
 
 Use `--repeat 10` and report the **median**; single runs are noise.
+**No results ship** — put measured runs in `results/` yourself.
+
+After a real eval, regenerate example transcripts (refuses without `output.json`):
+
+```bash
+# copy promptfoo's output.json into this directory first
+node generate-examples.mjs
+```
+
+## Run (agentic harness)
+
+Headless Claude Code sessions (safety + LOC tiers). Self-test first:
+
+```bash
+cd layers/eap-lean/bench/agentic
+python run.py --selftest
+# live (spends API): python run.py --all --models haiku --runs 1
+```
+
+Details: [`agentic/README.md`](agentic/README.md). Empty until you run it.
 
 ## Run (local models, via Ollama)
 

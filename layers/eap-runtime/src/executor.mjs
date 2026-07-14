@@ -213,13 +213,19 @@ function runChild(cmd, args, { timeoutMs, maxOutputBytes, cwd }) {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: groupKill,
+      // Captured stdout must stay machine-parseable; disable TTY color from
+      // deno/tsx/node even when the parent tool session has FORCE_COLOR set.
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0', DENO_NO_COLOR: '1' },
     });
     const out = { buf: [], bytes: 0, truncated: false };
     const err = { buf: [], bytes: 0, truncated: false };
     let timedOut = false;
     let settled = false;
     let graceTimer = null;
-    const decode = (state) => Buffer.concat(state.buf).toString('utf8');
+    // Deno (and some other runtimes) paint console.log of numbers even with
+    // NO_COLOR set. Strip CSI so returned stdout stays parseable for agents.
+    const ANSI_RE = /\x1B\[[0-9;]*[A-Za-z]/g;
+    const decode = (state) => Buffer.concat(state.buf).toString('utf8').replace(ANSI_RE, '');
     const finish = (result) => {
       if (settled) return;
       settled = true;
@@ -501,34 +507,87 @@ export async function executeFile(path, {
 // Run several scripts, bounded (eap_batch_execute). Sequential so resource use
 // stays predictable. Rejects batches larger than MAX_BATCH. Each item:
 //   { script, language?, timeoutMs?, intent? }
+// Run one batch item: a script ({ script }) or a store search
+// ({ search:true|type:'search', query|queries }). Used by eap_batch_execute.
+async function runBatchItem(it, { store, offloadThreshold, createdAt, maxOutputBytes }) {
+  const type = it.type === 'search' || it.search === true || (it.query != null && it.script == null)
+    ? 'search'
+    : 'script';
+  if (type === 'search') {
+    if (!store || typeof store.search !== 'function') {
+      return { ok: false, error: 'no-store', message: 'Search batch items require a RuntimeStore.', type: 'search' };
+    }
+    const hits = store.search(it.query ?? '', {
+      limit: it.limit ?? 5,
+      docId: it.docId ?? null,
+      queries: it.queries ?? null,
+      contentType: it.contentType ?? null,
+      fuzzy: it.fuzzy !== false,
+      proximity: it.proximity !== false,
+      throttle: it.throttle ?? false,
+    });
+    return { ok: true, type: 'search', hits, count: hits.length };
+  }
+  const r = await executeScript(it.script ?? '', {
+    language: it.language ?? 'python3',
+    timeoutMs: it.timeoutMs,
+    intent: it.intent,
+    maxOutputBytes,
+    store, offloadThreshold, createdAt,
+  });
+  return { ...r, type: 'script' };
+}
+
+// Map with bounded concurrency (1..8). Preserves result order.
+async function mapPool(items, concurrency, fn) {
+  const n = Math.max(1, Math.min(8, concurrency | 0));
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, () => worker()));
+  return results;
+}
+
 export async function executeBatch(items, {
   maxItems = MAX_BATCH,
   store = null,
   offloadThreshold = undefined,
   createdAt = 0,
   maxOutputBytes = DEFAULT_MAX_OUTPUT_BYTES,
+  concurrency = 1,
 } = {}) {
   if (!Array.isArray(items)) {
-    return { ok: false, error: 'bad-batch', message: 'eap_batch_execute requires an array of scripts.' };
+    return { ok: false, error: 'bad-batch', message: 'eap_batch_execute requires an array of scripts and/or searches.' };
   }
   if (items.length === 0) {
-    return { ok: false, error: 'empty-batch', message: 'eap_batch_execute needs at least one script.' };
+    return { ok: false, error: 'empty-batch', message: 'eap_batch_execute needs at least one item.' };
   }
   if (items.length > maxItems) {
     return { ok: false, error: 'batch-too-large', message: `Batch of ${items.length} exceeds the limit of ${maxItems}.` };
   }
-  const results = [];
-  for (const item of items) {
-    const it = item && typeof item === 'object' ? item : {};
-    // eslint-disable-next-line no-await-in-loop -- bounded & intentionally serial
-    const r = await executeScript(it.script ?? '', {
-      language: it.language ?? 'python3',
-      timeoutMs: it.timeoutMs,
-      intent: it.intent,
-      maxOutputBytes,
-      store, offloadThreshold, createdAt,
-    });
-    results.push(r);
-  }
-  return { ok: results.every((r) => r.ok), count: results.length, results };
+  const conc = Math.max(1, Math.min(8, Number(concurrency) || 1));
+  const run = (it) => runBatchItem(it && typeof it === 'object' ? it : {}, {
+    store, offloadThreshold, createdAt, maxOutputBytes,
+  });
+  const results = conc <= 1
+    ? await (async () => {
+      const out = [];
+      for (const item of items) {
+        // eslint-disable-next-line no-await-in-loop -- bounded & intentionally serial when concurrency=1
+        out.push(await run(item));
+      }
+      return out;
+    })()
+    : await mapPool(items, conc, (item) => run(item));
+  return {
+    ok: results.every((r) => r.ok),
+    count: results.length,
+    concurrency: conc,
+    results,
+  };
 }

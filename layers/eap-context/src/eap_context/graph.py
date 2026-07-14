@@ -22,12 +22,14 @@ import time
 
 from . import extract
 from . import ignore as ignore_mod
+from . import manifest as manifest_mod
 
 GRAPH_VERSION = 1
 CACHE_DIR = ".eap"
 CACHE_FILE = "graph.json"
 FILE_INDEX_FILE = "index.json"  # per-file fingerprint + symbol cache (incremental)
 FILE_INDEX_VERSION = 1
+COMMUNITY_FILE = "communities.json"  # label-propagation ids persisted at build
 
 DEFAULT_IGNORE = frozenset({
     ".git", "node_modules", ".eap", "dist", "build", "__pycache__",
@@ -40,6 +42,8 @@ DEFAULT_IGNORE = frozenset({
 AMBIGUOUS_REF_MAX = 8
 
 CALLABLE_KINDS = frozenset({"function", "method"})
+# Relations emitted from symbol.inherits / symbol.implements lists.
+TYPE_RELATIONS = frozenset({"inherits", "implements"})
 
 
 class SymbolGraph:
@@ -133,7 +137,7 @@ def _within(root_real: str, path_real: str) -> bool:
 
 
 def iter_source_files(root: str, ignore=DEFAULT_IGNORE):
-    """Yield (abspath, relpath) for supported source files under root.
+    """Yield (abspath, relpath) for supported source + manifest files under root.
 
     Symlinks are not followed: a symlinked directory is not descended into and
     a symlinked file is skipped, so out-of-tree source can never be indexed
@@ -141,8 +145,9 @@ def iter_source_files(root: str, ignore=DEFAULT_IGNORE):
 
     On top of the hardcoded *ignore* set (which always prunes first, so no
     ignore-file negation can re-include `.git` and friends), gitignore-syntax
-    rules from `<root>/.gitignore` and `<root>/.eapignore` are honoured —
-    merged, `.eapignore` last so it wins on conflicts.
+    rules from every ``.gitignore`` / ``.eapignore`` under the tree are
+    honoured — nested files are directory-scoped; ``.eapignore`` wins on
+    conflicts with a sibling ``.gitignore``.
     """
     root = os.path.abspath(root)
     root_real = os.path.realpath(root)
@@ -157,16 +162,20 @@ def iter_source_files(root: str, ignore=DEFAULT_IGNORE):
             and not rules.ignored(prefix + d, True)
         )
         for fname in sorted(filenames):
-            if os.path.splitext(fname)[1].lower() in extract.CODE_EXTENSIONS:
-                rel = prefix + fname
-                if rules.ignored(rel, False):
-                    continue
-                ap = os.path.join(dirpath, fname)
-                if os.path.islink(ap):
-                    continue  # symlink may point outside the tree
-                if not _within(root_real, os.path.realpath(ap)):
-                    continue  # backstop: resolved target escaped the root
-                yield ap, rel
+            ext = os.path.splitext(fname)[1].lower()
+            is_code = ext in extract.CODE_EXTENSIONS
+            is_manifest = fname in manifest_mod.MANIFEST_NAMES
+            if not (is_code or is_manifest):
+                continue
+            rel = prefix + fname
+            if rules.ignored(rel, False):
+                continue
+            ap = os.path.join(dirpath, fname)
+            if os.path.islink(ap):
+                continue  # symlink may point outside the tree
+            if not _within(root_real, os.path.realpath(ap)):
+                continue  # backstop: resolved target escaped the root
+            yield ap, rel
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +237,11 @@ def build(root: str, ignore=DEFAULT_IGNORE, incremental: bool = False,
             symbols = prev["symbols"]
             sha = prev["sha256"]
         else:
-            symbols, sha, size = extract.extract_file_hashed(abspath, rel)
+            if manifest_mod.is_manifest(rel):
+                symbols = manifest_mod.extract_manifest(abspath, rel)
+                sha = _file_sha(abspath)
+            else:
+                symbols, sha, size = extract.extract_file_hashed(abspath, rel)
         # Record a fingerprint for every walked source file (even 0-symbol ones)
         # so the next incremental build can skip them without a read.
         g.file_index[rel] = {"size": size, "mtime_ns": mtime_ns,
@@ -244,12 +257,14 @@ def build(root: str, ignore=DEFAULT_IGNORE, incremental: bool = False,
                              rel, sym["line"])
             rows.append((nid, sym))
             g.add_edge(mod_id, nid, "defines", "EXTRACTED")
+            if sym.get("kind") == "dependency":
+                g.add_edge(mod_id, nid, "depends_on", "EXTRACTED")
         per_file[rel] = rows
 
     # name index: short name -> [node ids] over definitions + modules
     index: dict[str, list[str]] = {}
     for nid, node in g.nodes.items():
-        if node["kind"] == "import":
+        if node["kind"] in ("import", "dependency"):
             continue
         short = node["name"].rsplit(".", 1)[-1]
         index.setdefault(short, []).append(nid)
@@ -258,6 +273,8 @@ def build(root: str, ignore=DEFAULT_IGNORE, incremental: bool = False,
     for rel, rows in per_file.items():
         for nid, sym in rows:
             src_kind = sym["kind"]
+            inherits = set(sym.get("inherits") or ())
+            implements = set(sym.get("implements") or ())
             for ref in dict.fromkeys(sym["refs"]):  # dedupe, keep order
                 targets = index.get(ref, [])
                 if not targets:
@@ -270,8 +287,14 @@ def build(root: str, ignore=DEFAULT_IGNORE, incremental: bool = False,
                     [(t, "EXTRACTED") for t in same_file]
                     + [(t, "INFERRED") for t in cross]
                 ):
-                    if src_kind == "import":
+                    if ref in inherits:
+                        relation = "inherits"
+                    elif ref in implements:
+                        relation = "implements"
+                    elif src_kind == "import":
                         relation = "imports"
+                    elif src_kind == "dependency":
+                        relation = "depends_on"
                     elif g.nodes[t]["kind"] in CALLABLE_KINDS:
                         relation = "calls"
                     else:
@@ -301,6 +324,53 @@ def cache_path(root: str) -> str:
 
 def file_index_path(root: str) -> str:
     return os.path.join(os.path.abspath(root), CACHE_DIR, FILE_INDEX_FILE)
+
+
+def communities_path(root: str) -> str:
+    return os.path.join(os.path.abspath(root), CACHE_DIR, COMMUNITY_FILE)
+
+
+def _stamp_communities(g: SymbolGraph) -> dict[str, int]:
+    """Run label-propagation and store community ids on nodes. Returns mapping."""
+    # Local import avoids a graph <-> algorithms cycle at module load.
+    from . import algorithms as alg_mod
+    result = alg_mod.communities(g)
+    mapping = result.get("node_community") or {}
+    for nid, cid in mapping.items():
+        if nid in g.nodes and isinstance(cid, int) and not isinstance(cid, bool):
+            g.nodes[nid]["community"] = cid
+    g.meta["communities"] = result.get("total_communities", 0)
+    return mapping
+
+
+def save_communities(root: str, mapping: dict[str, int]) -> str:
+    path = communities_path(root)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"node_community": mapping}, fh, indent=1)
+    os.replace(tmp, path)
+    return path
+
+
+def load_communities(root: str) -> dict[str, int]:
+    """{node_id: community_id}; missing/malformed → {}."""
+    path = communities_path(root)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        raw = data.get("node_community") if isinstance(data, dict) else None
+        if not isinstance(raw, dict):
+            return {}
+        out: dict[str, int] = {}
+        for k, v in raw.items():
+            if isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool):
+                out[k] = v
+        return out
+    except Exception:
+        return {}
 
 
 def save(g: SymbolGraph, path: str) -> str:
@@ -402,7 +472,11 @@ def load(path: str) -> SymbolGraph:
         # them the same way as file/line so a newline can't forge an extra line.
         _check_str_field(name, "node name")
         _check_str_field(kind, "node kind")
-        g.nodes[nid] = {"name": name, "kind": kind, "file": file, "line": line}
+        entry = {"name": name, "kind": kind, "file": file, "line": line}
+        community = node.get("community")
+        if isinstance(community, int) and not isinstance(community, bool) and community >= 0:
+            entry["community"] = community
+        g.nodes[nid] = entry
         g.out.setdefault(nid, [])
         g.inc.setdefault(nid, [])
     for link in links:
@@ -440,8 +514,10 @@ def load(path: str) -> SymbolGraph:
 def build_and_save(root: str, ignore=DEFAULT_IGNORE,
                    incremental: bool = False) -> tuple[SymbolGraph, str]:
     g = build(root, ignore, incremental=incremental)
+    mapping = _stamp_communities(g)
     path = save(g, cache_path(root))
     save_file_index(g, file_index_path(root))  # persist fingerprints for next --update
+    save_communities(root, mapping)
     return g, path
 
 
@@ -549,7 +625,19 @@ def _validate_symbol(sym, rel: str) -> dict:
         raise CacheFormatError("cached symbol refs must be a list")
     for r in refs:
         _check_str_field(r, "symbol ref")
-    return {"name": name, "kind": kind, "file": file, "line": line, "refs": refs}
+    out = {"name": name, "kind": kind, "file": file, "line": line, "refs": refs}
+    for key in ("inherits", "implements"):
+        vals = sym.get(key)
+        if vals is None:
+            continue
+        if not isinstance(vals, list):
+            raise CacheFormatError(f"cached symbol {key} must be a list")
+        clean = []
+        for r in vals:
+            _check_str_field(r, f"symbol {key}")
+            clean.append(r)
+        out[key] = clean
+    return out
 
 
 def load_file_index(root: str) -> dict:

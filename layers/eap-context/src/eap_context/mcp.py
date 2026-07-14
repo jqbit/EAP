@@ -3,7 +3,7 @@
 Tools exposed:
   eap_graph_build       — (re)index a directory into the .eap/graph.json cache
   eap_graph_query       — subgraph + file:line pointers for a text query
-  eap_graph_neighbors   — edges around one symbol
+  eap_graph_neighbors   — edges around one symbol (BFS/DFS)
   eap_graph_stats       — graph size/shape summary
   eap_graph_godnodes    — most-connected symbols
   eap_graph_path        — shortest path between two symbols (pointers)
@@ -13,6 +13,10 @@ Tools exposed:
   eap_graph_prs         — open PRs via the gh CLI
   eap_graph_pr_impact   — a PR's changed files -> affected closure
   eap_graph_reflect     — tag nodes preferred/contested (query-score overlay)
+  eap_graph_get_node    — single-node card (explain-lite)
+  eap_graph_explain     — structural "why this node" card
+  eap_graph_get_community — members of one stored community id
+  eap_graph_triage_prs  — structural PR ranking + overlap hints (no LLM)
 
 Dispatch is a pure function (`handle_request`) so it is testable without the
 stdio loop. Both MCP-style routing (initialize / tools/list / tools/call) and
@@ -153,6 +157,12 @@ class Engine:
         degree_cap = params.get("degree_cap")
         if degree_cap is not None:
             degree_cap = _coerce_int(degree_cap, "degree_cap")
+        mode = params.get("mode", "bfs")
+        if mode not in ("bfs", "dfs"):
+            raise JsonRpcError(INVALID_PARAMS, "mode must be bfs|dfs")
+        token_budget = params.get("token_budget")
+        if token_budget is not None:
+            token_budget = _coerce_int(token_budget, "token_budget")
         result = query_mod.query(
             self.graph(),
             text,
@@ -160,6 +170,8 @@ class Engine:
             limit=limit,
             degree_cap=degree_cap,
             tags=reflect_mod.load_tags(self.root),
+            mode=mode,
+            token_budget=token_budget,
         )
         reflect_mod.log_query(
             self.root, "eap_graph_query",
@@ -173,7 +185,13 @@ class Engine:
         direction = params.get("direction", "both")
         if direction not in ("in", "out", "both"):
             raise JsonRpcError(INVALID_PARAMS, "direction must be in|out|both")
-        return query_mod.neighbors(self.graph(), node, direction)
+        mode = params.get("mode", "bfs")
+        if mode not in ("bfs", "dfs"):
+            raise JsonRpcError(INVALID_PARAMS, "mode must be bfs|dfs")
+        depth = _coerce_int(params.get("depth", 1), "depth")
+        limit = _coerce_int(params.get("limit", DEFAULT_LIMIT), "limit")
+        return query_mod.neighbors(self.graph(), node, direction,
+                                   mode=mode, depth=depth, limit=limit)
 
     def stats(self, params: dict) -> dict:
         return query_mod.stats(self.graph())
@@ -250,6 +268,32 @@ class Engine:
                                "tag must be preferred|contested|clear")
         return reflect_mod.set_tags(self.root, self.graph(), nodes, tag)
 
+    def get_node(self, params: dict) -> dict:
+        node = params.get("node") or params.get("name")
+        if not node or not isinstance(node, str):
+            raise JsonRpcError(INVALID_PARAMS, "missing required string param 'node'")
+        return query_mod.get_node(self.graph(), node)
+
+    def explain(self, params: dict) -> dict:
+        node = params.get("node") or params.get("name")
+        if not node or not isinstance(node, str):
+            raise JsonRpcError(INVALID_PARAMS, "missing required string param 'node'")
+        return query_mod.explain(self.graph(), node, root=self.root)
+
+    def get_community(self, params: dict) -> dict:
+        if params.get("id") is None and params.get("community") is None:
+            raise JsonRpcError(INVALID_PARAMS,
+                               "missing required integer param 'id'")
+        cid = _coerce_int(params.get("id", params.get("community")), "id")
+        return query_mod.get_community(self.graph(), cid, root=self.root)
+
+    def triage_prs(self, params: dict) -> dict:
+        depth = _coerce_int(
+            params.get("depth", alg_mod.AFFECTED_DEFAULT_DEPTH), "depth")
+        limit = _coerce_int(params.get("limit", 20), "limit")
+        return prs_mod.triage_prs(self.graph(), root=self.root,
+                                  depth=depth, limit=limit)
+
 
 _TOOL_IMPLS = {
     "eap_graph_build": Engine.build,
@@ -264,6 +308,10 @@ _TOOL_IMPLS = {
     "eap_graph_prs": Engine.prs,
     "eap_graph_pr_impact": Engine.pr_impact,
     "eap_graph_reflect": Engine.reflect,
+    "eap_graph_get_node": Engine.get_node,
+    "eap_graph_explain": Engine.explain,
+    "eap_graph_get_community": Engine.get_community,
+    "eap_graph_triage_prs": Engine.triage_prs,
 }
 
 
@@ -290,6 +338,8 @@ TOOLS = [
             "query": {"type": "string"},
             "depth": {"type": "integer", "default": DEFAULT_DEPTH},
             "limit": {"type": "integer", "default": DEFAULT_LIMIT},
+            "mode": {"type": "string", "enum": ["bfs", "dfs"], "default": "bfs"},
+            "token_budget": {"type": "integer"},
         }, ["query"]),
     },
     {
@@ -298,6 +348,9 @@ TOOLS = [
         "inputSchema": _schema({
             "node": {"type": "string"},
             "direction": {"type": "string", "enum": ["in", "out", "both"]},
+            "mode": {"type": "string", "enum": ["bfs", "dfs"], "default": "bfs"},
+            "depth": {"type": "integer", "default": 1},
+            "limit": {"type": "integer", "default": DEFAULT_LIMIT},
         }, ["node"]),
     },
     {
@@ -372,12 +425,43 @@ TOOLS = [
         "name": "eap_graph_reflect",
         "description": ("Tag graph nodes 'preferred' (query-score boost) or "
                         "'contested' (penalty), or 'clear' the tag. Persisted; "
-                        "applied as a small overlay on future queries."),
+                        "applied as a small overlay on future queries. Also "
+                        "rewrites .eap/LESSONS.md for preferred tags."),
         "inputSchema": _schema({
             "nodes": {"type": "array", "items": {"type": "string"}},
             "tag": {"type": "string",
                     "enum": ["preferred", "contested", "clear"]},
         }, ["nodes", "tag"]),
+    },
+    {
+        "name": "eap_graph_get_node",
+        "description": ("Single-node card: metadata, degree, community id, "
+                        "and a sample of neighboring edges."),
+        "inputSchema": _schema({"node": {"type": "string"}}, ["node"]),
+    },
+    {
+        "name": "eap_graph_explain",
+        "description": ("Structural explanation of a symbol: hub status, "
+                        "community, relation histogram, sample callers/callees. "
+                        "No LLM."),
+        "inputSchema": _schema({"node": {"type": "string"}}, ["node"]),
+    },
+    {
+        "name": "eap_graph_get_community",
+        "description": ("Members of one community (ids stamped at build time "
+                        "by label propagation)."),
+        "inputSchema": _schema({"id": {"type": "integer"}}, ["id"]),
+    },
+    {
+        "name": "eap_graph_triage_prs",
+        "description": ("Structural PR triage (no LLM): rank open PRs by "
+                        "affected blast radius and flag overlapping "
+                        "affected-file sets; includes git worktree map."),
+        "inputSchema": _schema({
+            "depth": {"type": "integer",
+                      "default": alg_mod.AFFECTED_DEFAULT_DEPTH},
+            "limit": {"type": "integer", "default": 20},
+        }, []),
     },
 ]
 

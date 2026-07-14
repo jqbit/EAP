@@ -89,7 +89,7 @@ export function indexPath(store, path, {
     if (!body.trim()) { report.skipped.push({ path: f, reason: 'empty' }); continue; }
     const over = Buffer.byteLength(body) > maxFileBytes;
     if (over) body = body.slice(0, maxFileBytes); // per-file cap; flagged below
-    const p = store.index(f, body, { createdAt });
+    const p = store.index(f, body, { createdAt, path: f });
     report.indexed.push({ ...p, truncated: over });
   }
 

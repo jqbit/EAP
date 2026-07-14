@@ -20,6 +20,7 @@ if __package__ in (None, ""):  # pragma: no cover
     __package__ = "eap_context"
 
 from . import algorithms as alg_mod
+from . import export as export_mod
 from . import graph as graph_mod
 from . import hooks as hooks_mod
 from . import mcp as mcp_mod
@@ -46,7 +47,9 @@ def cmd_query(args) -> int:
     g = _load(args.root)
     result = query_mod.query(g, args.text, depth=args.depth, limit=args.limit,
                              degree_cap=args.degree_cap,
-                             tags=reflect_mod.load_tags(args.root))
+                             tags=reflect_mod.load_tags(args.root),
+                             mode=getattr(args, "mode", "bfs"),
+                             token_budget=getattr(args, "token_budget", None))
     reflect_mod.log_query(args.root, "query",
                           {"query": args.text, "depth": args.depth,
                            "limit": args.limit}, result)
@@ -54,7 +57,8 @@ def cmd_query(args) -> int:
         print(json.dumps(result, indent=1))
         return 0
     print(f"query: {result['query']}  (depth={result['depth']} "
-          f"limit={result['limit']} cap={result['degree_cap']})")
+          f"limit={result['limit']} cap={result['degree_cap']} "
+          f"mode={result.get('mode', 'bfs')})")
     print(f"nodes: {len(result['nodes'])}  edges: {len(result['edges'])}"
           + ("  [truncated]" if result["truncated"] else ""))
     for p in result["pointers"]:
@@ -74,16 +78,107 @@ def cmd_godnodes(args) -> int:
 
 
 def cmd_neighbors(args) -> int:
-    result = query_mod.neighbors(_load(args.root), args.node, args.direction)
+    result = query_mod.neighbors(
+        _load(args.root), args.node, args.direction,
+        mode=getattr(args, "mode", "bfs"),
+        depth=getattr(args, "depth", 1),
+        limit=getattr(args, "limit", DEFAULT_LIMIT))
     if result.get("node") is None:
         print(result.get("error", "not found"), file=sys.stderr)
         return 1
     node = result["node"]
     print(f"{node['name']} [{node['kind']}] degree={node['degree']}  {node['pointer']}")
     for e in result["neighbors"]:
-        print(f"  {e['direction']} {e['name']} [{e['relation']}/"
-              f"{e['provenance']}]  {e['pointer']}")
+        if "direction" in e:
+            print(f"  {e['direction']} {e['name']} [{e.get('relation', '')}/"
+                  f"{e.get('provenance', '')}]  {e['pointer']}")
+        else:
+            print(f"  {e['name']} [{e['kind']}]  {e['pointer']}")
     return 0
+
+
+def cmd_explain(args) -> int:
+    result = query_mod.explain(_load(args.root), args.node, root=args.root)
+    if args.json:
+        print(json.dumps(result, indent=1))
+        return 1 if result.get("node") is None else 0
+    if result.get("node") is None:
+        print(result.get("error", "not found"), file=sys.stderr)
+        return 1
+    node = result["node"]
+    print(f"{node['name']} [{node['kind']}] degree={node['degree']}  "
+          f"{node['pointer']}")
+    for w in result.get("why") or []:
+        print(f"  why: {w}")
+    for c in result.get("callers") or []:
+        print(f"  caller  {c}")
+    for c in result.get("callees") or []:
+        print(f"  callee  {c}")
+    return 0
+
+
+def cmd_export(args) -> int:
+    g = _load(args.root)
+    out = args.output
+    fmt = args.format
+    if fmt == "graphml":
+        path = export_mod.export_graphml(g, out)
+    elif fmt == "svg":
+        path = export_mod.export_svg(g, out, max_nodes=args.max_nodes)
+    else:
+        path = export_mod.export_html(g, out, max_nodes=args.max_nodes)
+    print(path)
+    return 0
+
+
+def cmd_merge_graphs(args) -> int:
+    graphs = []
+    for d in args.dirs:
+        graphs.append(graph_mod.load_or_build(d))
+    merged = export_mod.merge_graphs(graphs, namespace_by_root=not args.no_prefix)
+    if args.global_name:
+        path = export_mod.save_global(merged, args.global_name)
+    else:
+        path = graph_mod.save(merged, args.output)
+    print(f"merged {len(graphs)} graphs -> {path} "
+          f"({len(merged.nodes)} nodes / {len(merged.edges)} edges)")
+    return 0
+
+
+def cmd_watch(args) -> int:
+    """Poll mtimes and run incremental rebuild when sources change."""
+    import time
+    root = os.path.abspath(args.root)
+    interval = max(1.0, float(args.interval))
+    print(f"watching {root} every {interval:.0f}s (Ctrl-C to stop)",
+          file=sys.stderr)
+    last = None
+    try:
+        while True:
+            stamp = _tree_mtime_stamp(root)
+            if stamp != last:
+                g, path = graph_mod.build_and_save(root, incremental=True)
+                s = query_mod.stats(g)
+                print(f"updated {s['nodes']} nodes / {s['edges']} edges -> {path}",
+                      flush=True)
+                last = stamp
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("stopped", file=sys.stderr)
+        return 0
+
+
+def _tree_mtime_stamp(root: str) -> tuple:
+    """Cheap fingerprint: sorted (rel, mtime_ns, size) for source+manifest files."""
+    rows = []
+    for abspath, rel in graph_mod.iter_source_files(root):
+        try:
+            st = os.stat(abspath)
+            rows.append((rel, st.st_mtime_ns, st.st_size))
+        except OSError:
+            continue
+    rows.sort()
+    return tuple(rows)
 
 
 def cmd_path(args) -> int:
@@ -215,6 +310,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--depth", type=int, default=DEFAULT_DEPTH)
     p.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     p.add_argument("--degree-cap", type=int, default=None)
+    p.add_argument("--mode", choices=["bfs", "dfs"], default="bfs")
+    p.add_argument("--token-budget", type=int, default=None, dest="token_budget")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_query)
 
@@ -231,7 +328,40 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("node")
     p.add_argument("--root", default=".")
     p.add_argument("--direction", choices=["in", "out", "both"], default="both")
+    p.add_argument("--mode", choices=["bfs", "dfs"], default="bfs")
+    p.add_argument("--depth", type=int, default=1)
+    p.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     p.set_defaults(fn=cmd_neighbors)
+
+    p = sub.add_parser("explain", help="why a symbol matters (structural card)")
+    p.add_argument("node")
+    p.add_argument("--root", default=".")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_explain)
+
+    p = sub.add_parser("export", help="export graph as graphml|html|svg (stdlib)")
+    p.add_argument("--root", default=".")
+    p.add_argument("--format", choices=["graphml", "html", "svg"], default="graphml")
+    p.add_argument("--output", "-o", required=True)
+    p.add_argument("--max-nodes", type=int, default=200, dest="max_nodes")
+    p.set_defaults(fn=cmd_export)
+
+    p = sub.add_parser("merge-graphs",
+                       help="merge per-root graphs (optional ~/.eap/global)")
+    p.add_argument("dirs", nargs="+")
+    p.add_argument("--output", "-o", default="merged-graph.json")
+    p.add_argument("--global", dest="global_name", default=None,
+                   help="save under ~/.eap/global/<name>.json")
+    p.add_argument("--no-prefix", action="store_true",
+                   help="do not namespace node ids by root basename")
+    p.set_defaults(fn=cmd_merge_graphs)
+
+    p = sub.add_parser("watch",
+                       help="poll mtimes and incremental-rebuild on change")
+    p.add_argument("--root", default=".")
+    p.add_argument("--interval", type=float, default=2.0,
+                   help="seconds between polls (default 2)")
+    p.set_defaults(fn=cmd_watch)
 
     p = sub.add_parser("path", help="shortest path between two symbols")
     p.add_argument("source")

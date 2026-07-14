@@ -3,21 +3,19 @@
 Each extractor returns a list of symbol dicts:
 
     {"name": str,          # qualified within the file, e.g. "Store.save"
-     "kind": str,          # function | class | method | import
+     "kind": str,          # function | class | method | import | heading | key | …
      "file": str,          # path as given (relative when the caller passes one)
      "line": int,          # 1-based definition line
-     "refs": [str, ...]}   # bare names this symbol references (calls/bases/modules)
+     "refs": [str, ...],   # bare names this symbol references (calls/bases/modules)
+     "inherits": [str, …], # optional; class parents (regex/ast heuristic)
+     "implements": [str, …]}  # optional; interfaces (regex heuristic)
 
-Languages:
-  .py                  — ast module (FunctionDef/AsyncFunctionDef/ClassDef/Import/Call)
-  .js .mjs .jsx .ts .tsx — conservative line-anchored regexes
-  .go                  — conservative line-anchored regexes
-  .rs                  — Rust, conservative line-anchored regexes
-  .java                — Java, conservative line-anchored regexes
-  .c .h .cpp .cc .cxx .hpp .hh .hxx — C/C++, conservative line-anchored regexes
-  .cs                  — C#, conservative line-anchored regexes
-  .rb                  — Ruby, conservative line-anchored regexes
-  .php                 — PHP, conservative line-anchored regexes
+Languages (best-effort regex unless noted):
+  .py — ast; .js/.ts family; .go; .rs; .java; C/C++; .cs; .rb; .php;
+  .kt/.kts (Kotlin); .scala; .swift; .lua; .zig; .sh/.bash; .ex/.exs (Elixir);
+  .jl (Julia); .dart; .tf/.hcl (Terraform); .sql; .ps1/.psm1 (PowerShell);
+  .vue/.svelte (script blocks → JS extractor); .json (shallow keys);
+  .md/.markdown (headings); .yaml/.yml (top keys).
 
 Every regex extractor follows the same discipline as the JS/Go pair: patterns
 are ``^``-anchored per line (``re.M``), inter-token whitespace is confined to
@@ -34,6 +32,7 @@ from __future__ import annotations
 import ast
 import bisect
 import hashlib
+import json as _json
 import os
 import re
 
@@ -50,10 +49,33 @@ CODE_EXTENSIONS = {
     ".cs",
     ".rb",
     ".php",
+    ".kt", ".kts",
+    ".scala",
+    ".swift",
+    ".lua",
+    ".zig",
+    ".sh", ".bash",
+    ".ex", ".exs",
+    ".jl",
+    ".dart",
+    ".tf", ".hcl",
+    ".sql",
+    ".ps1", ".psm1",
+    ".vue", ".svelte",
+    ".json",
+    ".md", ".markdown",
+    ".yaml", ".yml",
 }
 
 _C_FAMILY_EXTS = {".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"}
 _JS_EXTS = {".js", ".mjs", ".jsx", ".ts", ".tsx"}
+_SHELL_EXTS = {".sh", ".bash"}
+_ELIXIR_EXTS = {".ex", ".exs"}
+_HCL_EXTS = {".tf", ".hcl"}
+_PS_EXTS = {".ps1", ".psm1"}
+_MD_EXTS = {".md", ".markdown"}
+_YAML_EXTS = {".yaml", ".yml"}
+_KOTLIN_EXTS = {".kt", ".kts"}
 
 # ---------------------------------------------------------------------------
 # public entry point
@@ -123,6 +145,40 @@ def _extract_from_bytes(raw: bytes, ext: str, rel: str) -> list[dict]:
         return _extract_ruby(text, rel)
     if ext == ".php":
         return _extract_php(text, rel)
+    if ext in _KOTLIN_EXTS:
+        return _extract_kotlin(text, rel)
+    if ext == ".scala":
+        return _extract_scala(text, rel)
+    if ext == ".swift":
+        return _extract_swift(text, rel)
+    if ext == ".lua":
+        return _extract_lua(text, rel)
+    if ext == ".zig":
+        return _extract_zig(text, rel)
+    if ext in _SHELL_EXTS:
+        return _extract_bash(text, rel)
+    if ext in _ELIXIR_EXTS:
+        return _extract_elixir(text, rel)
+    if ext == ".jl":
+        return _extract_julia(text, rel)
+    if ext == ".dart":
+        return _extract_dart(text, rel)
+    if ext in _HCL_EXTS:
+        return _extract_hcl(text, rel)
+    if ext == ".sql":
+        return _extract_sql(text, rel)
+    if ext in _PS_EXTS:
+        return _extract_powershell(text, rel)
+    if ext == ".vue":
+        return _extract_sfc(text, rel, "vue")
+    if ext == ".svelte":
+        return _extract_sfc(text, rel, "svelte")
+    if ext == ".json":
+        return _extract_json(text, rel)
+    if ext in _MD_EXTS:
+        return _extract_markdown(text, rel)
+    if ext in _YAML_EXTS:
+        return _extract_yaml(text, rel)
     return []
 
 
@@ -186,7 +242,8 @@ def _extract_python(text: str, rel: str) -> list[dict]:
                 walk(node.body, name + ".", False)
             elif isinstance(node, ast.ClassDef):
                 name = f"{prefix}{node.name}" if prefix else node.name
-                refs = [r for r in (_name_of(b) for b in node.bases) if r]
+                inherits = [r for r in (_name_of(b) for b in node.bases) if r]
+                refs = list(inherits)
                 refs += [r for r in (_name_of(d) for d in node.decorator_list) if r]
                 symbols.append({
                     "name": name,
@@ -194,6 +251,7 @@ def _extract_python(text: str, rel: str) -> list[dict]:
                     "file": rel,
                     "line": node.lineno,
                     "refs": refs,
+                    "inherits": inherits,
                 })
                 walk(node.body, name + ".", True)
             elif isinstance(node, ast.Import):
@@ -380,28 +438,57 @@ def _refs_in_slice(chunk: str, keywords: frozenset, own: str) -> list[str]:
     return refs
 
 
+def _split_type_list(blob: str | None) -> list[str]:
+    """'Foo, Bar<T>, baz.Qux' -> ['Foo', 'Bar', 'Qux'] (first/last idents)."""
+    if not blob:
+        return []
+    out: list[str] = []
+    for part in blob.split(","):
+        tok = re.sub(r"[<({[].*", "", part.strip())
+        tok = tok.split(".")[-1].split("::")[-1].split("\\")[-1].strip()
+        if tok and re.match(r"^[A-Za-z_]\w*$", tok):
+            out.append(tok)
+    return out
+
+
 def _extract_regex_lang(text: str, rel: str, defs, import_specs, keywords,
                         module_ref=_module_ref) -> list[dict]:
+    """Generic regex extractor.
+
+    Each *defs* entry is ``(kind, regex)``. Group 1 is the symbol name. When the
+    match has a group 2 it is treated as an ``inherits`` list (comma-split);
+    group 3 (if present) as ``implements``. Those names also land in ``refs`` so
+    the resolve pass can emit dedicated relation edges.
+    """
     newlines = _newline_offsets(text)  # computed once; line lookups are O(log n)
-    found: list[tuple[int, str, str, str | None]] = []  # (pos, kind, name, extra_ref)
+    # (pos, kind, name, inherits, implements)
+    found: list[tuple[int, str, str, list[str], list[str]]] = []
     for kind, rx in defs:
         for m in rx.finditer(text):
-            extra = m.group(2) if (m.lastindex or 1) >= 2 else None
-            found.append((m.start(), kind, m.group(1), extra))
+            inherits = _split_type_list(
+                m.group(2) if (m.lastindex or 1) >= 2 else None)
+            implements = _split_type_list(
+                m.group(3) if (m.lastindex or 1) >= 3 else None)
+            found.append((m.start(), kind, m.group(1), inherits, implements))
     found.sort(key=lambda t: t[0])
     symbols: list[dict] = []
-    for i, (pos, kind, name, extra) in enumerate(found):
+    for i, (pos, kind, name, inherits, implements) in enumerate(found):
         end = found[i + 1][0] if i + 1 < len(found) else len(text)
         refs = _refs_in_slice(text[pos:end], keywords, name)
-        if extra:
-            refs.append(extra.split(".")[-1])
-        symbols.append({
+        refs.extend(inherits)
+        refs.extend(implements)
+        sym: dict = {
             "name": name,
             "kind": kind,
             "file": rel,
             "line": _line_at(newlines, pos),
             "refs": sorted(set(refs)),
-        })
+        }
+        if inherits:
+            sym["inherits"] = inherits
+        if implements:
+            sym["implements"] = implements
+        symbols.append(sym)
     for pos, spec in import_specs:
         ref = module_ref(spec)
         symbols.append({
@@ -537,10 +624,13 @@ _JAVA_KEYWORDS = frozenset(
 )
 
 # A class/type declaration, with any run of Java modifiers first.
+# Group 2 = extends list; group 3 = implements list (best-effort, same line).
 _JAVA_CLASS = re.compile(
     r"^[ \t]*(?:(?:public|private|protected|abstract|final|static|sealed|"
     r"non-sealed|strictfp)[ \t]+)*(?:class|interface|enum|record)[ \t]+"
-    r"([A-Za-z_]\w*)", re.M)
+    r"([A-Za-z_]\w*)"
+    r"(?:[ \t]+extends[ \t]+([A-Za-z_][\w.<>, \t]*))?"
+    r"(?:[ \t]+implements[ \t]+([A-Za-z_][\w.<>, \t]*))?", re.M)
 # A method/constructor: at least one modifier, an optional single-token return
 # type, then `name(`. Requiring a modifier keeps `if (`/`return foo(` out. The
 # return-type token has no whitespace in its class, so it cannot overlap the
@@ -615,10 +705,12 @@ _CS_KEYWORDS = frozenset(
     "Console String List Dictionary".split()
 )
 
+# Group 2 = base/interface list after `:`; treated as inherits (C# folds both).
 _CS_CLASS = re.compile(
     r"^[ \t]*(?:(?:public|private|protected|internal|abstract|sealed|static|"
     r"partial|readonly|unsafe)[ \t]+)*(?:class|interface|struct|enum|record)"
-    r"[ \t]+([A-Za-z_]\w*)", re.M)
+    r"[ \t]+([A-Za-z_]\w*)"
+    r"(?:[ \t]*:[ \t]*([A-Za-z_][\w.<>, \t]*))?", re.M)
 _CS_METHOD = re.compile(
     r"^[ \t]*(?:(?:public|private|protected|internal|static|virtual|override|"
     r"abstract|async|sealed|extern|unsafe|new|partial)[ \t]+)+"
@@ -700,3 +792,483 @@ def _extract_php(text: str, rel: str) -> list[dict]:
     imports = _anchored_specs(text, _PHP_USE)
     return _extract_regex_lang(text, rel, _PHP_DEFS, imports, _PHP_KEYWORDS,
                                module_ref=_backslash_ref)
+
+
+# eap-lean: regex extractors are shallower than tree-sitter — upgrade path:
+#   add grammar-backed parse only if false-negative rate blocks real queries.
+
+
+# ---------------------------------------------------------------------------
+# Kotlin — conservative regex
+# ---------------------------------------------------------------------------
+
+_KOTLIN_KEYWORDS = frozenset(
+    "if for while when return fun class object interface val var import package "
+    "public private protected internal open abstract final override suspend "
+    "companion data sealed enum fun true false null this super as in is "
+    "println print listOf mapOf".split()
+)
+
+_KOTLIN_DEFS = [
+    ("function", re.compile(
+        r"^[ \t]*(?:(?:public|private|protected|internal|open|override|suspend|"
+        r"inline|tailrec|operator|infix|external|actual|expect)[ \t]+)*"
+        r"fun[ \t]+(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)[ \t]*(?:[(<])", re.M)),
+    ("class", re.compile(
+        r"^[ \t]*(?:(?:public|private|protected|internal|open|abstract|final|"
+        r"data|sealed|enum|inner|value|actual|expect)[ \t]+)*"
+        r"(?:class|interface|object)[ \t]+([A-Za-z_]\w*)"
+        r"(?:[ \t]*:[ \t]*([A-Za-z_][\w.<>, \t]*))?", re.M)),
+]
+
+_KOTLIN_IMPORT = re.compile(
+    r"^[ \t]*import[ \t]+([A-Za-z_][\w.]*(?:\.\*)?)", re.M)
+
+
+def _extract_kotlin(text: str, rel: str) -> list[dict]:
+    text = _scannable(text)
+    return _extract_regex_lang(text, rel, _KOTLIN_DEFS,
+                               _anchored_specs(text, _KOTLIN_IMPORT),
+                               _KOTLIN_KEYWORDS, module_ref=_dot_ref)
+
+
+# ---------------------------------------------------------------------------
+# Scala — conservative regex
+# ---------------------------------------------------------------------------
+
+_SCALA_KEYWORDS = frozenset(
+    "if for while match return def class object trait val var import package "
+    "override private protected abstract final sealed case new this super "
+    "true false null type given using".split()
+)
+
+_SCALA_DEFS = [
+    ("function", re.compile(
+        r"^[ \t]*(?:(?:override|private|protected|final|inline|opaque)[ \t]+)*"
+        r"def[ \t]+([A-Za-z_]\w*)", re.M)),
+    ("class", re.compile(
+        r"^[ \t]*(?:(?:abstract|final|sealed|case|private|protected)[ \t]+)*"
+        r"(?:class|object|trait)[ \t]+([A-Za-z_]\w*)"
+        r"(?:[ \t]+extends[ \t]+([A-Za-z_][\w.]*))?"
+        r"(?:[ \t]+with[ \t]+([A-Za-z_][\w. \t]*))?", re.M)),
+]
+
+_SCALA_IMPORT = re.compile(
+    r"^[ \t]*import[ \t]+([A-Za-z_][\w.]*(?:\.[_{*][\w., \t*]*)?)", re.M)
+
+
+def _extract_scala(text: str, rel: str) -> list[dict]:
+    # eap-lean: no brace-aware nesting — upgrade path: track indent/braces if
+    # qualified Scala members are needed.
+    text = _scannable(text)
+    return _extract_regex_lang(text, rel, _SCALA_DEFS,
+                               _anchored_specs(text, _SCALA_IMPORT),
+                               _SCALA_KEYWORDS, module_ref=_dot_ref)
+
+
+# ---------------------------------------------------------------------------
+# Swift — conservative regex
+# ---------------------------------------------------------------------------
+
+_SWIFT_KEYWORDS = frozenset(
+    "if for while switch return func class struct enum protocol extension "
+    "import public private internal open final override static var let "
+    "guard defer throw try catch true false nil self super as in is "
+    "print".split()
+)
+
+_SWIFT_DEFS = [
+    ("function", re.compile(
+        r"^[ \t]*(?:(?:public|private|internal|open|fileprivate|final|override|"
+        r"static|mutating|nonmutating|class)[ \t]+)*"
+        r"func[ \t]+([A-Za-z_]\w*)", re.M)),
+    ("class", re.compile(
+        r"^[ \t]*(?:(?:public|private|internal|open|fileprivate|final)[ \t]+)*"
+        r"(?:class|struct|enum|protocol|actor)[ \t]+([A-Za-z_]\w*)"
+        r"(?:[ \t]*:[ \t]*([A-Za-z_][\w., \t]*))?", re.M)),
+]
+
+_SWIFT_IMPORT = re.compile(r"^[ \t]*import[ \t]+([A-Za-z_][\w.]*)", re.M)
+
+
+def _extract_swift(text: str, rel: str) -> list[dict]:
+    text = _scannable(text)
+    return _extract_regex_lang(text, rel, _SWIFT_DEFS,
+                               _anchored_specs(text, _SWIFT_IMPORT),
+                               _SWIFT_KEYWORDS, module_ref=_dot_ref)
+
+
+# ---------------------------------------------------------------------------
+# Lua — conservative regex
+# ---------------------------------------------------------------------------
+
+_LUA_KEYWORDS = frozenset(
+    "if then else elseif end for while repeat until do return function local "
+    "and or not nil true false in pairs ipairs print require".split()
+)
+
+_LUA_DEFS = [
+    ("function", re.compile(
+        r"^[ \t]*(?:local[ \t]+)?function[ \t]+([A-Za-z_]\w*(?:[.:][A-Za-z_]\w*)*)",
+        re.M)),
+    ("function", re.compile(
+        r"^[ \t]*(?:local[ \t]+)?([A-Za-z_]\w*)[ \t]*=[ \t]*function\b", re.M)),
+]
+
+_LUA_REQUIRE = re.compile(
+    r"""require[ \t]*\([ \t]*['"]([^'"]+)['"]""", re.M)
+
+
+def _extract_lua(text: str, rel: str) -> list[dict]:
+    text = _scannable(text)
+    imports = _find_import_specs(text, _LUA_REQUIRE)
+    return _extract_regex_lang(text, rel, _LUA_DEFS, imports, _LUA_KEYWORDS)
+
+
+# ---------------------------------------------------------------------------
+# Zig — conservative regex
+# ---------------------------------------------------------------------------
+
+_ZIG_KEYWORDS = frozenset(
+    "if while for switch return fn const var pub export extern struct enum "
+    "union opaque test try catch defer errdefer and or null undefined "
+    "true false void comptime inline".split()
+)
+
+_ZIG_DEFS = [
+    ("function", re.compile(
+        r"^[ \t]*(?:pub[ \t]+)?(?:export[ \t]+)?(?:inline[ \t]+)?fn[ \t]+"
+        r"([A-Za-z_]\w*)", re.M)),
+    ("class", re.compile(
+        r"^[ \t]*(?:pub[ \t]+)?const[ \t]+([A-Za-z_]\w*)[ \t]*=[ \t]*"
+        r"(?:struct|enum|union|opaque)\b", re.M)),
+]
+
+_ZIG_IMPORT = re.compile(
+    r"""@[a-zA-Z]+[ \t]*\([ \t]*['"]([^'"]+)['"]""", re.M)
+
+
+def _extract_zig(text: str, rel: str) -> list[dict]:
+    text = _scannable(text)
+    imports = _find_import_specs(text, _ZIG_IMPORT)
+    return _extract_regex_lang(text, rel, _ZIG_DEFS, imports, _ZIG_KEYWORDS)
+
+
+# ---------------------------------------------------------------------------
+# Bash — conservative regex
+# ---------------------------------------------------------------------------
+
+_BASH_KEYWORDS = frozenset(
+    "if then else elif fi for while until do done case esac function return "
+    "select in time coproc declare local readonly export set unset echo "
+    "printf test true false".split()
+)
+
+_BASH_DEFS = [
+    ("function", re.compile(
+        r"^[ \t]*(?:function[ \t]+)?([A-Za-z_][\w-]*)[ \t]*\(\)[ \t]*\{?", re.M)),
+    ("function", re.compile(
+        r"^[ \t]*function[ \t]+([A-Za-z_][\w-]*)[ \t]*\{?", re.M)),
+]
+
+_BASH_SOURCE = re.compile(
+    r"""^[ \t]*(?:source|\.)[ \t]+['"]?([^ \t'"]+)['"]?""", re.M)
+
+
+def _extract_bash(text: str, rel: str) -> list[dict]:
+    # eap-lean: no shell AST — upgrade path: skip sourced dynamic expansions.
+    text = _scannable(text)
+    imports = []
+    for m in _BASH_SOURCE.finditer(text):
+        imports.append((m.start(), m.group(1)))
+    return _extract_regex_lang(text, rel, _BASH_DEFS, imports, _BASH_KEYWORDS)
+
+
+# ---------------------------------------------------------------------------
+# Elixir — conservative regex
+# ---------------------------------------------------------------------------
+
+_ELIXIR_KEYWORDS = frozenset(
+    "def defp defmodule defmacro defmacrop defstruct defprotocol defimpl "
+    "if unless case cond for with do end fn true false nil alias import "
+    "require use raise try rescue catch after".split()
+)
+
+_ELIXIR_DEFS = [
+    ("function", re.compile(
+        r"^[ \t]*defp?[ \t]+([A-Za-z_]\w*[!?]?)", re.M)),
+    ("class", re.compile(
+        r"^[ \t]*defmodule[ \t]+([A-Za-z_][\w.]*)", re.M)),
+]
+
+_ELIXIR_ALIAS = re.compile(
+    r"^[ \t]*(?:alias|import|require|use)[ \t]+([A-Za-z_][\w.]*)", re.M)
+
+
+def _extract_elixir(text: str, rel: str) -> list[dict]:
+    text = _scannable(text)
+    return _extract_regex_lang(text, rel, _ELIXIR_DEFS,
+                               _anchored_specs(text, _ELIXIR_ALIAS),
+                               _ELIXIR_KEYWORDS, module_ref=_dot_ref)
+
+
+# ---------------------------------------------------------------------------
+# Julia — conservative regex
+# ---------------------------------------------------------------------------
+
+_JULIA_KEYWORDS = frozenset(
+    "if else elseif for while function return module struct abstract primitive "
+    "macro quote begin end try catch finally using import export const global "
+    "local true false nothing".split()
+)
+
+_JULIA_DEFS = [
+    ("function", re.compile(
+        r"^[ \t]*(?:(?:function|macro)[ \t]+)([A-Za-z_!]\w*[!?]?)[ \t]*\(",
+        re.M)),
+    ("class", re.compile(
+        r"^[ \t]*(?:(?:mutable[ \t]+)?struct|abstract[ \t]+type|primitive[ \t]+"
+        r"type|module)[ \t]+([A-Za-z_]\w*)"
+        r"(?:[ \t]*<:[ \t]*([A-Za-z_][\w.]*))?", re.M)),
+]
+
+_JULIA_USING = re.compile(
+    r"^[ \t]*(?:using|import)[ \t]+([A-Za-z_][\w.]*)", re.M)
+
+
+def _extract_julia(text: str, rel: str) -> list[dict]:
+    text = _scannable(text)
+    return _extract_regex_lang(text, rel, _JULIA_DEFS,
+                               _anchored_specs(text, _JULIA_USING),
+                               _JULIA_KEYWORDS, module_ref=_dot_ref)
+
+
+# ---------------------------------------------------------------------------
+# Dart — conservative regex
+# ---------------------------------------------------------------------------
+
+_DART_KEYWORDS = frozenset(
+    "if for while switch return class mixin enum extension typedef import "
+    "export library part abstract final const static void var dynamic late "
+    "async await yield true false null this super new is as in try catch "
+    "finally throw print".split()
+)
+
+_DART_DEFS = [
+    ("function", re.compile(
+        r"^[ \t]*(?:(?:static|external|covariant)[ \t]+)*"
+        r"(?:[A-Za-z_][\w<>?\[\]., \t]*[ \t]+)?"
+        r"([A-Za-z_]\w*)[ \t]*\([^)\n]*\)[ \t]*(?:async[ \t]*)?\{", re.M)),
+    ("class", re.compile(
+        r"^[ \t]*(?:(?:abstract|base|interface|final|sealed|mixin)[ \t]+)*"
+        r"(?:class|mixin|enum|extension)[ \t]+([A-Za-z_]\w*)"
+        r"(?:[ \t]+extends[ \t]+([A-Za-z_][\w.]*))?"
+        r"(?:[ \t]+(?:with|implements)[ \t]+([A-Za-z_][\w., \t]*))?", re.M)),
+]
+
+_DART_IMPORT = re.compile(
+    r"""^[ \t]*import[ \t]+['"]([^'"]+)['"]""", re.M)
+
+
+def _extract_dart(text: str, rel: str) -> list[dict]:
+    # eap-lean: function regex needs a `{` body — upgrade path: allow `=>`.
+    text = _scannable(text)
+    imports = _find_import_specs(text, _DART_IMPORT)
+    return _extract_regex_lang(text, rel, _DART_DEFS, imports, _DART_KEYWORDS)
+
+
+# ---------------------------------------------------------------------------
+# Terraform / HCL — block labels as symbols
+# ---------------------------------------------------------------------------
+
+_HCL_BLOCK = re.compile(
+    r'^[ \t]*(resource|data|module|variable|output|provider|locals|terraform)'
+    r'[ \t]+(?:\"([^\"]+)\"[ \t]+)?(?:\"([^\"]+)\")?', re.M)
+
+
+def _extract_hcl(text: str, rel: str) -> list[dict]:
+    # eap-lean: no expression graph — upgrade path: parse references in attr values.
+    text = _scannable(text)
+    newlines = _newline_offsets(text)
+    symbols: list[dict] = []
+    for m in _HCL_BLOCK.finditer(text):
+        kind_kw, a, b = m.group(1), m.group(2), m.group(3)
+        if kind_kw == "locals":
+            name = "locals"
+        elif kind_kw == "terraform":
+            name = "terraform"
+        elif a and b:
+            name = f"{kind_kw}.{a}.{b}"
+        elif a:
+            name = f"{kind_kw}.{a}"
+        else:
+            name = kind_kw
+        symbols.append({
+            "name": name, "kind": "block", "file": rel,
+            "line": _line_at(newlines, m.start()), "refs": [],
+        })
+    return symbols
+
+
+# ---------------------------------------------------------------------------
+# SQL — CREATE … name
+# ---------------------------------------------------------------------------
+
+_SQL_CREATE = re.compile(
+    r"^[ \t]*CREATE[ \t]+(?:OR[ \t]+REPLACE[ \t]+)?"
+    r"(?:TEMP(?:ORARY)?[ \t]+)?"
+    r"(TABLE|VIEW|INDEX|FUNCTION|PROCEDURE|TRIGGER|SCHEMA|TYPE|SEQUENCE)"
+    r"[ \t]+(?:IF[ \t]+NOT[ \t]+EXISTS[ \t]+)?"
+    r"(?:[`\"\[]?([A-Za-z_]\w*)[`\"\]]?\.)?[`\"\[]?([A-Za-z_]\w*)[`\"\]]?",
+    re.M | re.I)
+
+
+def _extract_sql(text: str, rel: str) -> list[dict]:
+    # eap-lean: DDL names only — upgrade path: resolve JOIN/FK edges.
+    text = _scannable(text)
+    newlines = _newline_offsets(text)
+    symbols: list[dict] = []
+    for m in _SQL_CREATE.finditer(text):
+        schema, name = m.group(2), m.group(3)
+        qual = f"{schema}.{name}" if schema else name
+        symbols.append({
+            "name": qual, "kind": m.group(1).lower(), "file": rel,
+            "line": _line_at(newlines, m.start()), "refs": [],
+        })
+    return symbols
+
+
+# ---------------------------------------------------------------------------
+# PowerShell — function / filter / class
+# ---------------------------------------------------------------------------
+
+_PS_KEYWORDS = frozenset(
+    "if else elseif for foreach while switch return function filter class "
+    "param begin process end try catch finally throw param true false null "
+    "write-host write-output".split()
+)
+
+_PS_DEFS = [
+    ("function", re.compile(
+        r"^[ \t]*(?:function|filter|workflow)[ \t]+([A-Za-z_][\w-]*)", re.M)),
+    ("class", re.compile(
+        r"^[ \t]*class[ \t]+([A-Za-z_]\w*)"
+        r"(?:[ \t]*:[ \t]*([A-Za-z_][\w.]*))?", re.M)),
+]
+
+_PS_IMPORT = re.compile(
+    r"^[ \t]*(?:Import-Module|using[ \t]+module)[ \t]+([A-Za-z_][\w./-]*)",
+    re.M | re.I)
+
+
+def _extract_powershell(text: str, rel: str) -> list[dict]:
+    text = _scannable(text)
+    return _extract_regex_lang(text, rel, _PS_DEFS,
+                               _anchored_specs(text, _PS_IMPORT),
+                               _PS_KEYWORDS)
+
+
+# ---------------------------------------------------------------------------
+# Vue / Svelte SFCs — script blocks → JS extractor
+# ---------------------------------------------------------------------------
+
+_SCRIPT_BLOCK = re.compile(
+    r"<script\b[^>]*>(.*?)</script>", re.I | re.S)
+
+
+def _extract_sfc(text: str, rel: str, flavor: str) -> list[dict]:
+    # eap-lean: script-only; template/style ignored — upgrade path: template
+    # component refs if SFCs dominate queries.
+    symbols: list[dict] = []
+    for i, m in enumerate(_SCRIPT_BLOCK.finditer(text)):
+        block = m.group(1)
+        # Offset line numbers: pretreat by padding so JS line nums are absolute.
+        prefix_nl = text.count("\n", 0, m.start(1))
+        padded = ("\n" * prefix_nl) + block
+        for sym in _extract_js(padded, rel):
+            symbols.append(sym)
+    if not symbols:
+        # Still emit a module-ish marker so the file is present in the graph.
+        symbols.append({
+            "name": os.path.splitext(os.path.basename(rel))[0],
+            "kind": flavor, "file": rel, "line": 1, "refs": [],
+        })
+    return symbols
+
+
+# ---------------------------------------------------------------------------
+# JSON — shallow top-level keys as symbols
+# ---------------------------------------------------------------------------
+
+
+def _extract_json(text: str, rel: str) -> list[dict]:
+    # eap-lean: top-level keys only — upgrade path: bounded-depth walk if needed.
+    try:
+        data = _json.loads(text)
+    except (ValueError, RecursionError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    symbols: list[dict] = []
+    for i, key in enumerate(data):
+        if not isinstance(key, str) or not key or _has_ctrl(key):
+            continue
+        symbols.append({
+            "name": key, "kind": "key", "file": rel, "line": 1 + i, "refs": [],
+        })
+    return symbols
+
+
+def _has_ctrl(s: str) -> bool:
+    return any(ord(c) < 0x20 or ord(c) == 0x7f for c in s)
+
+
+# ---------------------------------------------------------------------------
+# Markdown — headings as nodes
+# ---------------------------------------------------------------------------
+
+_MD_HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)\s*$", re.M)
+
+
+def _extract_markdown(text: str, rel: str) -> list[dict]:
+    text = _scannable(text)
+    newlines = _newline_offsets(text)
+    symbols: list[dict] = []
+    seen: set[str] = set()
+    for m in _MD_HEADING.finditer(text):
+        title = m.group(2).strip()
+        # strip trailing '#…' from closed ATX and inline formatting noise
+        title = re.sub(r"[ \t]#+\s*$", "", title).strip()
+        if not title or _has_ctrl(title):
+            continue
+        name = title
+        if name in seen:
+            name = f"{title}@{_line_at(newlines, m.start())}"
+        seen.add(name)
+        symbols.append({
+            "name": name, "kind": "heading", "file": rel,
+            "line": _line_at(newlines, m.start()), "refs": [],
+        })
+    return symbols
+
+
+# ---------------------------------------------------------------------------
+# YAML — top-level keys (indent-0)
+# ---------------------------------------------------------------------------
+
+_YAML_TOP = re.compile(
+    r"^([A-Za-z_][\w.-]*)[ \t]*:", re.M)
+
+
+def _extract_yaml(text: str, rel: str) -> list[dict]:
+    # eap-lean: top keys only (indent 0) — upgrade path: nested path keys.
+    text = _scannable(text)
+    newlines = _newline_offsets(text)
+    symbols: list[dict] = []
+    for m in _YAML_TOP.finditer(text):
+        # reject indented keys: match must start at column 0 (re.M ^ does that)
+        symbols.append({
+            "name": m.group(1), "kind": "key", "file": rel,
+            "line": _line_at(newlines, m.start()), "refs": [],
+        })
+    return symbols

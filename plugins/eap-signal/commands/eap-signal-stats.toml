@@ -1,0 +1,2 @@
+description = "Measured EAP-Signal session stats (no invented %)"
+prompt = "Run /eap-signal-stats. Report measured session figures only — no invented savings percentages."

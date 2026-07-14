@@ -19,12 +19,17 @@
     "test:py": "python3 tests/test_context_engine.py",
     "bench": "python3 bench/run.py",
     "check": "bash scripts/check-contamination.sh",
-    "eap": "node bin/eap-install.mjs",
-    "eap:list": "node bin/eap-install.mjs --list",
-    "eap:install": "node bin/eap-install.mjs --only claude",
-    "eap:uninstall": "node bin/eap-install.mjs --uninstall"
+    "eap": "node bin/eap.mjs",
+    "eap:list": "node bin/eap.mjs list",
+    "eap:install": "node bin/eap.mjs install --only claude",
+    "eap:uninstall": "node bin/eap.mjs uninstall",
+    "eap:update": "node bin/eap.mjs update",
+    "eap:doctor": "node bin/eap.mjs doctor"
   },
-  "bin": { "eap-install": "bin/eap-install.mjs" },
+  "bin": {
+    "eap": "bin/eap.mjs",
+    "eap-install": "bin/eap-install.mjs"
+  },
   "keywords": [
     "ai-agents", "context-engineering", "token-reduction", "mcp",
     "code-graph", "retrieval", "output-compression", "efficient-agent-protocol"

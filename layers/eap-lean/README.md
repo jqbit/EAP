@@ -13,17 +13,22 @@ code it writes). Both are always-on rules that install into the same rules file;
 `--no-lean` opts out of Lean while keeping Signal.
 
 Concept-derived from **ponytail** by Dietrich Gebert (MIT) — the ladder shape,
-the review tag vocabulary, and the safety carve-outs are re-expressed here in
-original prose. **No ponytail source code is used.** See
-`../../docs/legal/ATTRIBUTION.md`.
+the review tag vocabulary, and the safety carve-outs are re-expressed here.
+Rule text / skills are a documentation derivative; `examples/` and `bench/`
+(including GPT/Gemini promptfoo twins and the agentic harness) are MIT **ports**
+of ponytail's corpus. EAP does **not** vendor ponytail hooks — those are
+reimplemented under `src/hooks/`. See `../../docs/legal/ATTRIBUTION.md`.
 
 ## Files
 
 - `EAP-LEAN.md` — the canonical always-on rule (drop into any agent's memory/rules file).
 - `DESIGN.md` — what it is, the concept-derivation from ponytail, how it composes with the other layers.
-- `skills/` — five prompt-only tooling skills (review, audit, debt, gain, help). No runtime.
-- `examples/` — before/after pairs showing the ladder: benchmark transcripts + hand-written ladder cards.
-- `bench/` — the benchmark harness (promptfoo + Ollama runners, LOC + correctness gates). Ships no numbers; run it yourself.
+- `docs/platform-native.md` — platform-native catalog (Native rung cheat sheet).
+- `docs/agent-portability.md` — host × file matrix for Lean.
+- `skills/` — six prompt-only skills (mode switch + review/audit/debt/gain/help). No runtime.
+- `examples/` — before/after pairs: benchmark transcripts + hand-written ladder cards.
+- `bench/` — harness (promptfoo Claude/GPT/Gemini + Ollama + agentic). Ships no numbers.
+- `README.es.md` / `README.ko.md` — Spanish / Korean stubs.
 
 ## Levels
 
@@ -36,6 +41,12 @@ original prose. **No ponytail source code is used.** See
 
 Switch with `/eap lean lite|full|ultra|off` (where supported) — the same verb
 shape as `/eap signal`. Level persists until changed.
+
+**New-session default:** `EAP_LEAN_DEFAULT_MODE` env, or
+`~/.config/eap/config.json` / project `.eap/config.json`
+(`leanDefaultMode` or `defaultMode`), or `/eap lean default <mode>`.
+Built-in fallback: `full`. Signal twin: `EAP_SIGNAL_DEFAULT_MODE` /
+`signalDefaultMode`.
 
 ## Safety carve-outs ("never lazy about")
 
@@ -51,14 +62,15 @@ Brevity never wins over these; they are hard overrides:
 
 ## Tooling skills (prompt-only)
 
+- `skills/eap-lean/` — mode switch for skill-only hosts (`/eap lean lite|full|ultra|off`).
 - `skills/eap-lean-review/` — over-engineering review of a diff → a tagged delete-list (`delete`/`stdlib`/`native`/`yagni`/`shrink`) + a `net: -N lines possible` estimate.
 - `skills/eap-lean-audit/` — the same lens repo-wide, ranked biggest cut first.
 - `skills/eap-lean-debt/` — harvest every `eap-lean:` comment into a debt ledger so deferred shortcuts don't rot silently.
 - `skills/eap-lean-gain/` — one-shot measured-only scoreboard (marker count + session net figures). Never a benchmark percentage or per-repo cost claim.
 - `skills/eap-lean-help/` — quick-reference card: levels, skills, switch syntax, deactivation.
 
-All five read and report only — they never apply fixes, and correctness /
-security / performance bugs are explicitly out of their scope.
+Review/audit/debt/gain/help read and report only — they never apply fixes.
+Correctness / security / performance bugs are out of their scope.
 
 ## What it does NOT do
 

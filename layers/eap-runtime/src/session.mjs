@@ -6,6 +6,11 @@
 // the next SessionStart restore() rehydrates it so working state survives
 // compaction and --continue.
 //
+// PostToolUse extractors (file edits, errors, git summaries, decisions) enrich
+// the taxonomy from tool payloads without an LLM. PreCompact can emit a short
+// Session Guide narrative that stays inside the byte budget and only cites
+// measured store stats (never $/% savings claims).
+//
 // The snapshot stays hard-capped and deterministic, but each surviving section
 // carries a runnable retrieval hint (eap_search / eap_session_restore) so the
 // omitted detail is recoverable on demand rather than lost. restore() can also
@@ -66,6 +71,174 @@ export function classifyError(summary) {
 
 const oneLine = (s) => String(s).replace(/\s+/g, ' ').trim().slice(0, SUMMARY_MAX_CHARS);
 
+// ── PostToolUse extractors (deterministic, no LLM) ───────────────────────────
+
+const EDIT_TOOLS = new Set([
+  'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'StrReplace', 'CreateFile',
+  'Delete', 'DeleteFile', 'ApplyPatch',
+]);
+
+function toolName(input) {
+  return input && typeof input === 'object' && typeof input.tool_name === 'string'
+    ? input.tool_name : '';
+}
+
+function toolInput(input) {
+  const ti = input && typeof input === 'object' ? input.tool_input : null;
+  return ti && typeof ti === 'object' ? ti : {};
+}
+
+function toolOutputText(input) {
+  if (!input || typeof input !== 'object') return '';
+  const r = input.tool_response ?? input.tool_output ?? input.output ?? input.stdout;
+  if (r == null) return '';
+  return typeof r === 'string' ? r : JSON.stringify(r);
+}
+
+/** Paths touched by edit/write tools. */
+export function extractEditedFiles(input) {
+  const tool = toolName(input);
+  const ti = toolInput(input);
+  const paths = [];
+  const push = (p) => {
+    if (typeof p === 'string' && p.trim()) paths.push(p.trim());
+  };
+  if (EDIT_TOOLS.has(tool) || /edit|write|create|delete|patch/i.test(tool)) {
+    push(ti.file_path || ti.path || ti.target || ti.notebook_path);
+    if (Array.isArray(ti.edits)) {
+      for (const e of ti.edits) {
+        if (e && typeof e === 'object') push(e.file_path || e.path);
+      }
+    }
+  }
+  return [...new Set(paths)];
+}
+
+/** Error-like signals from tool output / is_error flags. */
+export function extractErrors(input) {
+  const out = [];
+  if (!input || typeof input !== 'object') return out;
+  if (input.is_error === true || input.isError === true) {
+    out.push(oneLine(toolOutputText(input) || 'tool reported is_error'));
+  }
+  const text = toolOutputText(input);
+  if (!text) return out;
+  const lines = text.split('\n');
+  for (const line of lines.slice(0, 40)) {
+    if (/\b(error|exception|traceback|fatal|failed)\b/i.test(line)
+      && !/0 error/i.test(line)) {
+      out.push(oneLine(line));
+      if (out.length >= 3) break;
+    }
+  }
+  // Exit-code failures from Bash-like tools.
+  if (typeof input.exit_code === 'number' && input.exit_code !== 0) {
+    out.push(oneLine(`exit ${input.exit_code}: ${text.slice(0, 120)}`));
+  }
+  return [...new Set(out)];
+}
+
+/** Short git status / log summary from Bash git commands. */
+export function extractGitSummary(input) {
+  const tool = toolName(input);
+  const ti = toolInput(input);
+  const cmd = typeof ti.command === 'string' ? ti.command : '';
+  if (tool !== 'Bash' && tool !== 'Shell') return null;
+  if (!/\bgit\b/.test(cmd)) return null;
+  const text = toolOutputText(input).trim();
+  if (!text) return oneLine(`git: ${cmd.slice(0, 80)}`);
+  // Prefer a compact head of status/log output.
+  const head = text.split('\n').filter((l) => l.trim()).slice(0, 6).join(' | ');
+  return oneLine(`git ${cmd.replace(/^git\s+/, '').slice(0, 40)}: ${head}`);
+}
+
+/** Heuristic decision phrases in tool output or explicit Decision markers. */
+export function extractDecisions(input) {
+  const text = toolOutputText(input);
+  if (!text) return [];
+  const found = [];
+  for (const line of text.split('\n')) {
+    const m = line.match(/^\s*(?:decision|decided|chose|we(?:'| a)?re going with)\s*[:—-]\s*(.+)$/i)
+      || line.match(/^\s*DECISION\s*[:—-]\s*(.+)$/i);
+    if (m) {
+      found.push(oneLine(m[1] || m[0]));
+      if (found.length >= 2) break;
+    }
+  }
+  return found;
+}
+
+/**
+ * Expand a PostToolUse (or similar) payload into taxonomy events.
+ * Returns [{ kind, summary }, ...] — caller injects `ts` when appending.
+ */
+export function extractSessionEvents(input) {
+  const events = [];
+  for (const p of extractEditedFiles(input)) {
+    events.push({ kind: 'file_edit', summary: `edited ${p}` });
+  }
+  for (const err of extractErrors(input)) {
+    events.push({ kind: 'error', summary: err });
+  }
+  const git = extractGitSummary(input);
+  if (git) events.push({ kind: 'git', summary: git });
+  for (const d of extractDecisions(input)) {
+    events.push({ kind: 'decision', summary: d });
+  }
+  return events;
+}
+
+/**
+ * Short Session Guide narrative for PreCompact / resume. Measured honesty only:
+ * cites event counts and optional store bytes — never $/% savings claims.
+ * Hard-capped so it can sit beside (or inside) the tiered snapshot budget.
+ */
+export function buildSessionGuide(events, {
+  maxBytes = 600,
+  stats = null,
+} = {}) {
+  const list = Array.isArray(events) ? events : [];
+  const count = (kind) => list.filter((e) => e.kind === kind || (kind === 'edit' && ['edit', 'write', 'file_write', 'file_edit'].includes(e.kind))).length;
+  const decisions = list.filter((e) => e.kind === 'decision').slice(-3);
+  const errors = list.filter((e) => e.kind === 'error').slice(-3);
+  const edits = list.filter((e) => ['edit', 'write', 'file_write', 'file_edit'].includes(e.kind)).slice(-5);
+  const git = list.filter((e) => e.kind === 'git').slice(-2);
+
+  const lines = ['## EAP Session Guide'];
+  lines.push(`Events: ${list.length} (decisions ${count('decision')}, errors ${count('error')}, edits ${count('edit')}, git ${count('git')}).`);
+  if (stats && Number.isFinite(stats.bytesKeptOut)) {
+    lines.push(`Store (measured): ${stats.docs ?? '?'} docs, ${stats.bytesKeptOut} bytes kept out of context`
+      + (stats.chunks != null ? `, ${stats.chunks} chunks` : '') + '.');
+  }
+  if (decisions.length) {
+    lines.push('Decisions:');
+    for (const d of decisions) lines.push(`- ${oneLine(d.summary)}`);
+  }
+  if (errors.length) {
+    lines.push('Errors:');
+    for (const e of errors) lines.push(`- [${classifyError(e.summary)}] ${oneLine(e.summary)}`);
+  }
+  if (edits.length) {
+    lines.push('Files touched:');
+    for (const e of edits) lines.push(`- ${oneLine(e.summary)}`);
+  }
+  if (git.length) {
+    lines.push('Git:');
+    for (const g of git) lines.push(`- ${oneLine(g.summary)}`);
+  }
+  lines.push('Recover detail via eap_session_restore() / eap_search(query).');
+
+  let body = lines.join('\n');
+  while (Buffer.byteLength(body) > maxBytes && lines.length > 3) {
+    lines.splice(2, 1); // drop from the middle/top detail first after header+counts
+    body = lines.join('\n');
+  }
+  if (Buffer.byteLength(body) > maxBytes) {
+    body = body.slice(0, maxBytes);
+  }
+  return body;
+}
+
 // Render one event line. Error events are tagged with their classification so a
 // snapshot reader can scan failure modes: `[error:timeout] ...`.
 function eventLine(e) {
@@ -74,19 +247,16 @@ function eventLine(e) {
 }
 
 // Pure snapshot builder: events -> compact text, hard-capped at maxBytes.
-// Ordering is by tier (ascending), then recency (newest first), then insertion
-// order — fully deterministic for a given event list and injected ts. Each tier
-// that keeps at least one event is preceded by a runnable retrieval hint; hints
-// and events share the byte budget, and a hint is only emitted immediately
-// before an event that fits (so no orphan headers).
-export function buildSnapshot(events, { ts = 0, maxBytes = SNAPSHOT_MAX_BYTES } = {}) {
+// Priority events pack first; an optional Session Guide fills leftover budget
+// (inserted after the header) so tiny caps never drop decisions for prose.
+export function buildSnapshot(events, { ts = 0, maxBytes = SNAPSHOT_MAX_BYTES, guide = null } = {}) {
   const header = `EAP session snapshot @${ts} — ${events.length} event(s)`;
   const ordered = events
     .map((e, i) => ({ ...e, _i: i }))
     .sort((a, b) =>
       tierOf(a.kind) - tierOf(b.kind) || b.ts - a.ts || b._i - a._i);
 
-  const parts = [header];
+  const eventParts = [];
   let size = Buffer.byteLength(header);
   let omitted = 0;
   let lastTier = null;
@@ -97,39 +267,52 @@ export function buildSnapshot(events, { ts = 0, maxBytes = SNAPSHOT_MAX_BYTES } 
     const hintText = tier !== lastTier ? `\n${TIER_HINTS[tier] ?? '# other'}` : '';
     const hb = Buffer.byteLength(hintText);
     if (size + hb + b <= maxBytes) {
-      if (hintText) { parts.push(hintText); size += hb; lastTier = tier; }
-      parts.push(line);
+      if (hintText) { eventParts.push(hintText); size += hb; lastTier = tier; }
+      eventParts.push(line);
       size += b;
     } else {
       omitted++;
     }
   }
   if (omitted > 0) {
-    // The elision marker must itself fit inside the cap; drop trailing lines
-    // (lowest-priority of what made it in) until it does.
     let marker = `\n(+${omitted} more event(s) in the store)`;
-    while (parts.length > 1 && size + Buffer.byteLength(marker) > maxBytes) {
-      size -= Buffer.byteLength(parts.pop());
+    while (eventParts.length > 0 && size + Buffer.byteLength(marker) > maxBytes) {
+      size -= Buffer.byteLength(eventParts.pop());
       omitted++;
       marker = `\n(+${omitted} more event(s) in the store)`;
     }
-    if (size + Buffer.byteLength(marker) <= maxBytes) parts.push(marker);
+    if (size + Buffer.byteLength(marker) <= maxBytes) {
+      eventParts.push(marker);
+      size += Buffer.byteLength(marker);
+    }
   }
+
+  const parts = [header];
+  if (guide && typeof guide === 'string' && guide.trim()) {
+    let g = '\n' + guide.trim();
+    const room = maxBytes - size;
+    if (room > 40) {
+      while (Buffer.byteLength(g) > room) g = g.slice(0, Math.max(0, g.length - 8));
+      if (g.trim().length > 20) {
+        parts.push(g);
+        size += Buffer.byteLength(g);
+      }
+    }
+  }
+  parts.push(...eventParts);
   return parts.join('');
 }
 
-// Note text surfacing project memory files as retrievable pointers (no content).
 function memoryNote(mem) {
   const list = mem.map((m) => `${m.name} (present at project root — read on demand, not injected)`).join('; ');
   return `# project memory — ${list}`;
 }
 
-// Event log + snapshot persistence on the store's existing SQLite database
-// (DESIGN.md "Storage": one database, chunks FTS + session event log/snapshots).
+// Event log + snapshot persistence on the store's existing SQLite database.
 export class SessionLog {
-  // Accepts a RuntimeStore (reuses its db) or a raw DatabaseSync handle.
   constructor(storeOrDb) {
     this.db = storeOrDb?.db ?? storeOrDb;
+    this.store = storeOrDb?.stats ? storeOrDb : null;
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS events (
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -145,9 +328,6 @@ export class SessionLog {
     `);
   }
 
-  // Append one event. ts is required and injected (no Date.now here). `kind` may
-  // be any string; the taxonomy in EVENT_KINDS drives priority but is not a
-  // hard whitelist (unknown kinds fall to the lowest tier).
   append({ ts, kind, summary } = {}) {
     if (!Number.isFinite(ts)) throw new TypeError('append: ts must be a finite number (inject it; this module never reads the clock)');
     if (typeof kind !== 'string' || !kind.trim()) throw new TypeError('append: kind must be a non-empty string');
@@ -157,29 +337,36 @@ export class SessionLog {
     return { seq: Number(r.lastInsertRowid) };
   }
 
+  /** Append extractor events from a tool payload. */
+  appendFromTool(input, { ts } = {}) {
+    if (!Number.isFinite(ts)) throw new TypeError('appendFromTool: ts required');
+    const added = [];
+    for (const ev of extractSessionEvents(input)) {
+      added.push(this.append({ ts, kind: ev.kind, summary: ev.summary }));
+    }
+    return { added: added.length, seqs: added.map((a) => a.seq) };
+  }
+
   events() {
     return this.db.prepare('SELECT seq, ts, kind, summary FROM events ORDER BY seq').all()
       .map((r) => ({ seq: Number(r.seq), ts: Number(r.ts), kind: r.kind, summary: r.summary }));
   }
 
-  // Build the priority-tiered snapshot, persist it (single latest row), and
-  // return it. Called at PreCompact.
-  snapshot({ ts = 0, maxBytes = SNAPSHOT_MAX_BYTES } = {}) {
+  // Build the priority-tiered snapshot (+ optional Session Guide), persist it.
+  snapshot({ ts = 0, maxBytes = SNAPSHOT_MAX_BYTES, includeGuide = true } = {}) {
     const evs = this.events();
-    const body = buildSnapshot(evs, { ts, maxBytes });
+    let guide = null;
+    if (includeGuide) {
+      const stats = this.store && typeof this.store.stats === 'function' ? this.store.stats() : null;
+      const guideBudget = Math.min(600, Math.floor(maxBytes * 0.35));
+      guide = buildSessionGuide(evs, { maxBytes: guideBudget, stats });
+    }
+    const body = buildSnapshot(evs, { ts, maxBytes, guide });
     this.db.prepare('INSERT OR REPLACE INTO snapshots (id, ts, body) VALUES (1, ?, ?)')
       .run(Math.trunc(ts), body);
-    return { ts: Math.trunc(ts), body, bytes: Buffer.byteLength(body), events: evs.length };
+    return { ts: Math.trunc(ts), body, bytes: Buffer.byteLength(body), events: evs.length, guide: !!guide };
   }
 
-  // Return the latest persisted snapshot (or null). Called at SessionStart.
-  //
-  // `memoryFiles` (optional, injected — this module never touches the filesystem)
-  // is a list of project memory file names present at the root, e.g.
-  // ['CLAUDE.md','AGENTS.md']. When provided, their presence is surfaced as
-  // retrievable pointers (a note appended to the body + a `memory` field); their
-  // CONTENT is never read or injected. With no memoryFiles the return is byte-for-
-  // byte identical to the persisted snapshot (backward-compatible).
   restore({ memoryFiles = [] } = {}) {
     const row = this.db.prepare('SELECT ts, body FROM snapshots WHERE id = 1').get();
     const mem = (Array.isArray(memoryFiles) ? memoryFiles : [])

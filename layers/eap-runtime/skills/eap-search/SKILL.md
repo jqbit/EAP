@@ -18,17 +18,21 @@ Call the `eap_search` MCP tool (eap-runtime server) with the user's query.
 
 - `query` — the user's terms, as given (the store fuses stemmed-keyword and
   substring matching itself; do not pre-mangle the query).
+- `queries` — optional string array for multi-query fusion in one call.
 - `docId` — set it when the user names a pointer (`eap_…`) so retrieval is
   scoped to that document.
+- `contentType` — optional `code` | `prose` | `all`.
 - `limit` — default 5; raise only if the user asks for more.
+- Fuzzy correction and proximity rerank are on by default; path-tracked hits
+  may include `stale: true` when the file changed.
 
 ## Presentation
 
 For each hit show: `docId` + chunk index (the source span), the snippet as a
 locator, and the **exact chunk body** — retrieval is lossless; never replace
-the body with your own summary. You may add interpretation *after* quoting.
-No hits: say so and suggest terms (e.g. from a pointer's vocabulary) — do not
-pad with guesses.
+the body with your own summary. Flag `stale` plainly. You may add interpretation
+*after* quoting. No hits: say so and suggest terms (e.g. from a pointer's
+vocabulary) — do not pad with guesses.
 
 ## Boundaries
 

@@ -1,0 +1,2 @@
+description = "Per-repo EAP-Signal always-on init"
+prompt = "Run eap-signal-init for this repo with args: {{args}}. Prefer --dry-run unless --force was requested."

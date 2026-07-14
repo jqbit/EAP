@@ -1,0 +1,16 @@
+{
+  "name": "eap-signal-shrink",
+  "version": "0.1.0",
+  "description": "MCP proxy that compresses prose fields using EAP-Signal rules. Adapted from TLDR tldr-shrink (MIT).",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "eap-signal-shrink": "index.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "compress.mjs",
+    "spawn-options.mjs",
+    "README.md"
+  ]
+}

@@ -12,7 +12,8 @@ license: MIT
 
 # EAP-Runtime stats
 
-Call the `eap_stats` MCP tool (eap-runtime server), then present the result.
+Call `eap_stats` (or `eap_report` for by-kind / TTL / path-tracked counts).
+Never claim a hosted insight product — local measured numbers only.
 
 ## Presentation
 

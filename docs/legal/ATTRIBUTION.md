@@ -13,6 +13,12 @@ prompt lineage. The "compress like a caveman, sound like a senior engineer"
 design (drop the persona, keep the compression) is documented in TLDR's
 `data/philosophy.md`. All of this lineage is MIT and libre-compatible.
 
+EAP-Signal's user-facing suite (skills, eapcrew agents, commands,
+`eap-signal-shrink`, `eap-signal-init`, stats/model-override hooks) adapts
+substantial MIT code from TLDR (preferred) and caveman (second); notices in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
+- **TLDR** — https://github.com/0point9bar/TLDR — MIT, © ZeroPointNineBar.
 - **caveman** — https://github.com/JuliusBrussee/caveman — MIT, © 2026 Julius Brussee.
 - **ponytail** by Dietrich Gebert — https://github.com/DietrichGebert/ponytail — MIT.
   EAP-Lean (`layers/eap-lean/`) is a **concept-derived, clean-room code-brevity
@@ -32,10 +38,14 @@ design (drop the persona, keep the compression) is documented in TLDR's
   (`layers/eap-lean/bench/` — task configs, correctness/LOC gates, runner
   scripts) are ports of ponytail's `examples/` and `benchmarks/`. ponytail is MIT,
   so this is fully licence-compatible; per MIT its copyright and permission notice
-  is retained in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). What EAP-Lean
-  does **not** take is ponytail's runtime (hooks, mode tracker, MCP server) — that
-  is reimplemented independently. EAP-Lean is a peer of EAP-Signal (Signal shrinks
-  the prose; Lean shrinks the code), prompt-only and always-on.
+  is retained in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).   What EAP-Lean
+  does **not** take is ponytail's runtime *source* (hooks, mode tracker, MCP
+  server) — those behaviors are **reimplemented** under `src/hooks/` (`eap-state`,
+  `eap-dispatch`, statusline wrappers) with EAP env/config names
+  (`EAP_LEAN_DEFAULT_MODE`, `EAP_SUBAGENT_MATCHER`, …). Docs also port
+  platform-native + agent-portability catalogs under `layers/eap-lean/docs/`.
+  EAP-Lean is a peer of EAP-Signal (Signal shrinks the prose; Lean shrinks the
+  code), prompt-only and always-on.
 
 ## EAP-Context (input / retrieval)
 

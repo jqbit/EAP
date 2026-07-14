@@ -10,15 +10,16 @@
 // accepted and ignored). Tools exposed (DESIGN.md "Public interface"):
 //   eap_execute            run a script in a subprocess; stdout only, auto-offloaded
 //   eap_execute_file       run an existing script file from disk
-//   eap_batch_execute      run several scripts, bounded and sequential
+//   eap_batch_execute      scripts and/or searches; optional concurrency 1–8
 //   eap_index              chunk + index content behind a searchable pointer
-//   eap_search             lossless chunk retrieval (RRF-fused) from the FTS store
+//   eap_search             lossless retrieval (+ multi-query, filters, fuzzy, stale)
 //   eap_fetch              SSRF-hardened URL fetch; reduced text, auto-offloaded
-//   eap_fetch_and_index    fetch + index a URL; return a searchable pointer
+//   eap_fetch_and_index    fetch + index (+ TTL, force, parallel requests[])
 //   eap_stats              measured bytes kept out of context + token estimate
+//   eap_report             local measured summary (docs/bytes/kinds; no $/%)
 //   eap_offload            inline-or-pointer decision for arbitrary content
 //   eap_purge              clear the store or a single document
-//   eap_doctor             self-check: node, runtimes, sqlite, store health
+//   eap_doctor             self-check: version, hooks, runtimes, sqlite, store
 //   eap_upgrade            safe-core self-update: version + pinned release tag + store migrate + doctor + apply plan
 //   eap_session_snapshot   priority-tiered <=2KB snapshot (PreCompact)
 //   eap_session_restore    persisted snapshot + project-memory pointers (SessionStart)
@@ -32,15 +33,16 @@
 import { createInterface } from 'node:readline';
 import { mkdirSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { RuntimeStore, probeSqlite } from './store.mjs';
+import { RuntimeStore, DEFAULT_INDEX_TTL_MS } from './store.mjs';
 import { SessionLog } from './session.mjs';
-import { executeScript, executeFile, executeBatch, runtimeAvailability } from './executor.mjs';
+import { executeScript, executeFile, executeBatch } from './executor.mjs';
 import { fetchUrl } from './fetch.mjs';
 import { indexPath } from './indexdir.mjs';
 import { upgrade as runUpgrade } from './upgrade.mjs';
+import { runDoctor } from './doctor.mjs';
 
 export const PROTOCOL_VERSION = '2025-06-18';
-export const SERVER_INFO = { name: 'eap-runtime', version: '0.2.0' };
+export const SERVER_INFO = { name: 'eap-runtime', version: '0.3.0' };
 
 const LANGUAGE_ENUM = [
   'python3', 'python', 'node', 'javascript', 'js', 'bash', 'sh', 'ruby', 'go',
@@ -78,7 +80,7 @@ export const TOOLS = [
   },
   {
     name: 'eap_batch_execute',
-    description: 'Run several scripts sequentially (bounded to 20). Returns per-script results. Each item: { script, language?, timeoutMs?, intent? }.',
+    description: 'Run several scripts and/or searches (bounded to 20). Optional concurrency 1–8. Each item is either a script { script, language?, timeoutMs?, intent? } or a search { query|queries, search:true, limit?, docId?, contentType? }.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -91,10 +93,17 @@ export const TOOLS = [
               language: { type: 'string', enum: LANGUAGE_ENUM },
               timeoutMs: { type: 'number' },
               intent: { type: 'string' },
+              search: { type: 'boolean', description: 'If true, treat as a store search instead of a script.' },
+              type: { type: 'string', enum: ['script', 'search'] },
+              query: { type: 'string' },
+              queries: { type: 'array', items: { type: 'string' } },
+              limit: { type: 'number' },
+              docId: { type: 'string' },
+              contentType: { type: 'string', enum: ['code', 'prose', 'all'] },
             },
-            required: ['script'],
           },
         },
+        concurrency: { type: 'number', description: 'Parallelism 1–8 (default 1).' },
       },
       required: ['scripts'],
     },
@@ -115,15 +124,20 @@ export const TOOLS = [
   },
   {
     name: 'eap_search',
-    description: 'Query the full-text store; returns exact matching chunks (lossless, RRF-fused keyword+substring) with source spans and a locator snippet, never summaries.',
+    description: 'Query the full-text store; returns exact matching chunks (lossless, RRF-fused keyword+substring) with source spans and a locator snippet, never summaries. Supports contentType filter, multi-query (queries[]), proximity rerank, fuzzy correction on zero hits, optional progressive throttle, and stale flags for path-tracked docs.',
     inputSchema: {
       type: 'object',
       properties: {
-        query: { type: 'string' },
+        query: { type: 'string', description: 'Primary query (optional when queries[] is set).' },
+        queries: { type: 'array', items: { type: 'string' }, description: 'Multi-query fusion in one call.' },
         limit: { type: 'number', default: 5 },
         docId: { type: 'string', description: 'Restrict to one indexed document.' },
+        contentType: { type: 'string', enum: ['code', 'prose', 'all'], description: 'Filter chunks by heuristic kind.' },
+        fuzzy: { type: 'boolean', description: 'Edit-distance correction when zero hits (default true).' },
+        proximity: { type: 'boolean', description: 'Multi-term proximity rerank (default true).' },
+        throttle: { type: ['boolean', 'number', 'string'], description: 'Optional progressive throttle (true|ms); or set EAP_SEARCH_THROTTLE=1.' },
+        checkStale: { type: 'boolean', description: 'Flag path-tracked hits when file hash changed (default true).' },
       },
-      required: ['query'],
     },
   },
   {
@@ -141,21 +155,48 @@ export const TOOLS = [
   },
   {
     name: 'eap_fetch_and_index',
-    description: 'Fetch an http/https URL (same SSRF hardening as eap_fetch), reduce HTML to text, index it, and return a searchable pointer + a term vocabulary — never the raw body.',
+    description: 'Fetch an http/https URL (same SSRF hardening as eap_fetch), reduce HTML to text, index it, and return a searchable pointer + a term vocabulary — never the raw body. Supports TTL (default 24h; ttl:0 disables), force re-fetch/re-index, and parallel multi-URL via requests[] (concurrency 1–8). Expired docs are cleaned before index.',
     inputSchema: {
       type: 'object',
       properties: {
-        url: { type: 'string' },
+        url: { type: 'string', description: 'Single URL (optional when requests[] is set).' },
+        requests: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              url: { type: 'string' },
+              timeoutMs: { type: 'number' },
+              maxBytes: { type: 'number' },
+              ttl: { type: 'number', description: 'TTL ms for this URL; 0 = no expiry.' },
+              force: { type: 'boolean' },
+            },
+            required: ['url'],
+          },
+          description: 'Parallel multi-URL fetch+index (concurrency 1–8).',
+        },
         timeoutMs: { type: 'number' },
         maxBytes: { type: 'number' },
+        ttl: { type: 'number', description: 'Index TTL in ms (default 24h). Pass 0 for no expiry.' },
+        force: { type: 'boolean', description: 'Bypass fetch TTL cache and re-index.' },
+        concurrency: { type: 'number', description: 'Parallelism for requests[] (1–8, default 4).' },
       },
-      required: ['url'],
     },
   },
   {
     name: 'eap_stats',
     description: 'Report measured bytes kept out of context (a real sum of indexed bytes) plus an estimated token count (~bytes/4 heuristic, labelled — not a modeled percentage, no dollar figure).',
     inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'eap_report',
+    description: 'Local measured store summary: docs/chunks/bytesKeptOut, by-kind breakdown, expired and path-tracked counts. Measured values only — never dollar or percentage savings claims. Not a hosted SaaS product.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        now: { type: 'number', description: 'Injected clock for expiry accounting (defaults to server clock).' },
+      },
+    },
   },
   {
     name: 'eap_offload',
@@ -182,7 +223,7 @@ export const TOOLS = [
   },
   {
     name: 'eap_doctor',
-    description: 'Self-check: node version, language-runtime availability (python/node/bash/ruby/go/rust/php/perl/r/elixir/typescript/csharp), node:sqlite + FTS5/trigram support, and store health.',
+    description: 'Self-check: runtime version, node >= 22, language-runtime availability, node:sqlite + FTS5/trigram, store integrity, and best-effort hook registration. Never falls back to better-sqlite3.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -272,7 +313,9 @@ export function createDispatcher({
           createdAt: now(),
         });
       case 'eap_batch_execute':
-        return executeBatch(args.scripts, { store, createdAt: now() });
+        return executeBatch(args.scripts, {
+          store, createdAt: now(), concurrency: args.concurrency ?? 1,
+        });
       case 'eap_index':
         if (typeof args.path === 'string' && args.path) {
           return indexPath(store, args.path, {
@@ -280,8 +323,22 @@ export function createDispatcher({
           });
         }
         return store.index(requireString(args, 'source'), requireString(args, 'content'), { createdAt: now() });
-      case 'eap_search':
-        return { hits: store.search(requireString(args, 'query'), { limit: args.limit ?? 5, docId: args.docId ?? null }) };
+      case 'eap_search': {
+        const hasQueries = Array.isArray(args.queries) && args.queries.length > 0;
+        const q = typeof args.query === 'string' ? args.query : '';
+        if (!hasQueries && !q.trim()) throw new Error('missing required string argument "query" (or non-empty queries[])');
+        const hits = store.search(q, {
+          limit: args.limit ?? 5,
+          docId: args.docId ?? null,
+          queries: hasQueries ? args.queries : null,
+          contentType: args.contentType ?? null,
+          fuzzy: args.fuzzy !== false,
+          proximity: args.proximity !== false,
+          throttle: args.throttle ?? false,
+          checkStale: args.checkStale !== false,
+        });
+        return { hits };
+      }
       case 'eap_fetch': {
         const res = await fetch(requireString(args, 'url'), { timeoutMs: args.timeoutMs, maxBytes: args.maxBytes, now });
         if (res.error) return res; // ssrf-blocked / scheme-blocked / fetch-failed / bad-url
@@ -295,21 +352,60 @@ export function createDispatcher({
           : { ...head, offloaded: true, pointer: off.pointer, hint: off.hint };
       }
       case 'eap_fetch_and_index': {
-        const res = await fetch(requireString(args, 'url'), { timeoutMs: args.timeoutMs, maxBytes: args.maxBytes, now });
-        if (res.error) return res;
-        const p = store.index(`eap_fetch:${res.finalUrl}`, res.text, { createdAt: now() });
-        const vocab = store.vocabulary(p.id, { limit: 15 });
-        return {
-          ok: res.ok, status: res.status, finalUrl: res.finalUrl, contentType: res.contentType,
-          bytes: res.bytes, truncated: res.truncated, pointer: p.id, chunks: p.chunks,
-          vocabulary: vocab,
-          hint: `Indexed ${p.chunks} section(s) from ${res.finalUrl}. ` +
-            `Query with eap_search(query, { docId: "${p.id}" }).` +
-            (vocab.length ? ` Terms: ${vocab.slice(0, 10).join(', ')}.` : ''),
-        };
+        store.purgeExpired({ now: now() });
+        const reqs = Array.isArray(args.requests) && args.requests.length
+          ? args.requests
+          : [{ url: requireString(args, 'url'), timeoutMs: args.timeoutMs, maxBytes: args.maxBytes, ttl: args.ttl, force: args.force }];
+        if (reqs.length > 20) throw new Error('eap_fetch_and_index requests[] capped at 20');
+        const conc = Math.max(1, Math.min(8, Number(args.concurrency) || (reqs.length > 1 ? 4 : 1)));
+        const defaultTtl = args.ttl === 0 ? 0 : (Number.isFinite(args.ttl) ? args.ttl : DEFAULT_INDEX_TTL_MS);
+
+        async function one(req) {
+          const url = typeof req.url === 'string' ? req.url : '';
+          if (!url) return { ok: false, error: 'bad-url', reason: 'missing url' };
+          const force = req.force === true || args.force === true;
+          const ttl = req.ttl === 0 ? 0 : (Number.isFinite(req.ttl) ? req.ttl : defaultTtl);
+          const final = await fetch(url, {
+            timeoutMs: req.timeoutMs ?? args.timeoutMs,
+            maxBytes: req.maxBytes ?? args.maxBytes,
+            now,
+            cache: force ? null : undefined,
+          });
+          if (final.error) return final;
+          const ts = now();
+          const p = store.index(`eap_fetch:${final.finalUrl}`, final.text, {
+            createdAt: ts,
+            now: ts,
+            ttlMs: ttl,
+          });
+          const vocab = store.vocabulary(p.id, { limit: 15 });
+          return {
+            ok: final.ok, status: final.status, finalUrl: final.finalUrl, contentType: final.contentType,
+            bytes: final.bytes, truncated: final.truncated, cached: final.cached,
+            pointer: p.id, chunks: p.chunks, expiresAt: p.expiresAt, vocabulary: vocab,
+            hint: `Indexed ${p.chunks} section(s) from ${final.finalUrl}. ` +
+              `Query with eap_search(query, { docId: "${p.id}" }).` +
+              (vocab.length ? ` Terms: ${vocab.slice(0, 10).join(', ')}.` : ''),
+          };
+        }
+
+        if (reqs.length === 1) return one(reqs[0]);
+        // Bounded parallel pool
+        const results = new Array(reqs.length);
+        let cursor = 0;
+        async function worker() {
+          while (cursor < reqs.length) {
+            const i = cursor++;
+            results[i] = await one(reqs[i]);
+          }
+        }
+        await Promise.all(Array.from({ length: Math.min(conc, reqs.length) }, () => worker()));
+        return { ok: results.every((r) => r && r.ok !== false && !r.error), count: results.length, concurrency: conc, results };
       }
       case 'eap_stats':
         return store.stats();
+      case 'eap_report':
+        return store.report({ now: Number.isFinite(args.now) ? args.now : now() });
       case 'eap_offload':
         return store.offload(requireString(args, 'source'), requireString(args, 'content'), {
           threshold: args.threshold,
@@ -318,14 +414,7 @@ export function createDispatcher({
       case 'eap_purge':
         return store.purge({ docId: args.docId ?? null });
       case 'eap_doctor':
-        return {
-          ok: true,
-          node: process.version,
-          platform: process.platform,
-          sqlite: probeSqlite(),
-          runtimes: runtimeAvailability(),
-          store: store.health(),
-        };
+        return runDoctor({ store });
       case 'eap_upgrade':
         return upgrade({
           tag: typeof args.tag === 'string' && args.tag ? args.tag : null,
