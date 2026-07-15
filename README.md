@@ -34,7 +34,7 @@ One installer, one hook dispatcher, one skill format, four disciplines.
 | **EAP-Lean** | **shipping** | Minimal-code craft (ponytail MIT derivative): 7-rung ladder + safety carve-outs, prompt-only, installed alongside Signal (`--no-lean` to skip); mode + review/audit/debt/gain/help skills. |
 | **EAP-Runtime** | **built** (clean-room) | 13-tool MCP server: polyglot executor (12 languages), dual-tokenizer RRF FTS offload store, SSRF-hardened `eap_fetch`/`fetch_and_index`, `execute_file`/`batch_execute`/`doctor`/`purge`, session event log + snapshot/restore. |
 | **EAP-Context** | **built** (stdlib-only) | Symbol-graph engine, 10 languages (Python `ast` + regex for JS/TS/Go/Rust/Java/C/C++/C#/Ruby/PHP), 8 MCP tools incl. shortest-path/communities/centrality, fuzzy seeding, incremental index. 52 Python tests (`npm run test:py`). |
-| **Installer** | **built** | `bin/eap-install.mjs` — wires Signal + Lean (+ skills/commands where the host supports them) and both MCP servers. **End-to-end: Claude Code** (incl. `/eap-update` command + `eap-update` skill). **Native Signal+Lean+MCP+skills:** codex, grok, hermes, cursor, antigravity, opencode (+ slash commands/agents, incl. `/eap-update`). **Native Signal+Lean (+ skills):** pi, windsurf; **rules only:** cline (`~/Documents/Cline/Rules` — no global skills dir without marketplace IDs). **Gemini:** local extension context (`GEMINI.md`) under `~/.gemini/extensions/eap` — skills not staged (extension API is context-only). **Planned:** Copilot (no stable global instructions path), continue/kilo/roo/augment (`npx skills add` profile IDs). See `--list`. |
+| **Installer** | **built** | `bin/eap-install.mjs` — wires Signal + Lean (+ skills/commands where the host supports them) and both MCP servers. **End-to-end: Claude Code** (incl. `/eap-update` command + `eap-update` skill). **Native Signal+Lean+MCP+skills:** codex, grok, hermes, cursor, antigravity, omp (oh-my-pi, `~/.omp/agent`), opencode (+ slash commands/agents, incl. `/eap-update`). **Native Signal+Lean (+ skills):** pi, windsurf; **rules only:** cline (`~/Documents/Cline/Rules` — no global skills dir without marketplace IDs). **Gemini:** local extension context (`GEMINI.md`) under `~/.gemini/extensions/eap` — skills not staged (extension API is context-only). **Planned:** Copilot (no stable global instructions path), continue/kilo/roo/augment (`npx skills add` profile IDs). See `--list`. |
 | **Bench** | **built** | Deterministic harness over a committed 82 KB corpus; 6 fixed tasks, B2 vs honest grep baseline B1: 37.3% aggregate token reduction, task success 6/6 (`npm run bench`). |
 
 See `docs/ARCHITECTURE.md` for the full design and `EAP.md` for the protocol.
@@ -108,10 +108,11 @@ For **Claude Code** the installer is end-to-end. It:
 
 Beyond Claude Code, the installer also wires **native** agents:
 
-- **codex, grok, hermes, cursor, antigravity, opencode** — Signal + Lean rules, Signal+Lean+Runtime
+- **codex, grok, hermes, cursor, antigravity, omp, opencode** — Signal + Lean rules, Signal+Lean+Runtime
   **skills** (incl. `eap-update`), and both **EAP MCP servers** (CLI or JSON). opencode also gets
   slash **commands** (incl. `/eap-update`) and eapcrew **agents**. cursor rules land in
-  `~/.cursor/rules/eap.mdc` (`alwaysApply`).
+  `~/.cursor/rules/eap.mdc` (`alwaysApply`). omp (oh-my-pi) uses `~/.omp/agent/AGENTS.md` +
+  `~/.omp/agent/mcp.json` (default agent dir; profile-scoped when `OMP_PROFILE`/`PI_PROFILE` is set).
 - **pi** — Signal + Lean rules + skills (no MCP; Pi uses npm extensions).
 - **windsurf** — `~/.windsurf/rules/eap.md` + skills; **cline** — rules only at
   `~/Documents/Cline/Rules/eap.md` (skills need marketplace profile IDs).
