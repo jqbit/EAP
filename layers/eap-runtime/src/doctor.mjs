@@ -25,12 +25,14 @@ export function detectHooksRegistered({
   home = process.env.HOME || '',
   marker = 'eap-dispatch',
 } = {}) {
-  const candidates = settingsPaths || [
+  // Dedup: when cwd == home the .claude/settings.json path repeats, which would
+  // otherwise list the same file twice in settingsFiles (and re-scan it).
+  const candidates = [...new Set(settingsPaths || [
     join(home, '.claude', 'settings.json'),
     join(home, '.config', 'claude', 'settings.json'),
     join(process.cwd(), '.claude', 'settings.json'),
     join(process.cwd(), '.cursor', 'hooks.json'),
-  ];
+  ])];
   const found = [];
   const events = Object.fromEntries(HOOK_EVENTS.map((e) => [e, false]));
   for (const p of candidates) {
