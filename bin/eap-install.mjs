@@ -513,26 +513,25 @@ function copyDirRecursive(src, dest) {
   }
 }
 
-// Strip Claude-only agent frontmatter (`tools:` as a YAML array, `model:`) when
-// writing eapcrew agents into a non-Claude host like opencode. opencode rejects
-// the YAML-array `tools:` form — one such file makes the WHOLE config invalid,
-// so no MCP/skills/agents load at all — and it cannot resolve Anthropic model
-// aliases such as `haiku`. Omitting both lets opencode fall back to its defaults
-// while the agent prompt body still self-restricts. Mirrors TLDR's
-// bin/lib/opencode-agent.js. Claude keeps the array + model (it honors both).
-function stripClaudeAgentFrontmatter(content) {
+// Strip Claude's YAML-array `tools:` frontmatter when writing eapcrew agents
+// into opencode. opencode requires `tools` as an object map (or the field
+// omitted) and rejects the array form — one such file makes the WHOLE opencode
+// config invalid, so no MCP/skills/agents load at all. Omitting it lets opencode
+// use its defaults while the agent prompt body still self-restricts. `model:` is
+// a valid opencode field and is left intact (matches TLDR's bin/lib/opencode-
+// agent.js, whose tests deliberately preserve it). Claude keeps the array as-is.
+function stripOpencodeAgentTools(content) {
   const FENCE = '---\n';
   if (typeof content !== 'string' || !content.startsWith(FENCE)) return content;
   const fmEnd = content.indexOf('\n---', FENCE.length);
   if (fmEnd < 0) return content;
   const fm = content.slice(FENCE.length, fmEnd);
   const rest = content.slice(fmEnd);
-  const DROP = /^(tools|model)[ \t]*:/;
   const out = [];
   let dropping = false;
   for (const line of fm.split('\n')) {
     if (dropping) { if (/^[ \t]/.test(line)) continue; dropping = false; }
-    if (DROP.test(line)) { dropping = true; continue; }
+    if (/^tools[ \t]*:/.test(line)) { dropping = true; continue; }
     out.push(line);
   }
   return FENCE + out.join('\n') + rest;
@@ -870,9 +869,9 @@ function installNativeAssets(ctx, prov) {
     const dest = resolveSentinelPath(n.agents);
     if (opts.dryRun) note(`  agents: copy eapcrew into ${dest}/`);
     else {
-      // Native hosts that take eapcrew subagents (opencode) need the Claude-only
-      // `tools:`/`model:` frontmatter stripped or their config load breaks.
-      const err = installAgentsInto(dest, opts, stripClaudeAgentFrontmatter);
+      // opencode rejects Claude's YAML-array `tools:`; strip it (a single bad
+      // file invalidates the whole opencode config). `model:` is left intact.
+      const err = installAgentsInto(dest, opts, stripOpencodeAgentTools);
       if (err) warn(`  agents failed (${dest}): ${err}`);
       else ok(`  agents → ${dest}`);
     }
