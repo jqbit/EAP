@@ -513,13 +513,17 @@ function copyDirRecursive(src, dest) {
   }
 }
 
-// Strip Claude's YAML-array `tools:` frontmatter when writing eapcrew agents
-// into opencode. opencode requires `tools` as an object map (or the field
-// omitted) and rejects the array form — one such file makes the WHOLE opencode
-// config invalid, so no MCP/skills/agents load at all. Omitting it lets opencode
-// use its defaults while the agent prompt body still self-restricts. `model:` is
-// a valid opencode field and is left intact (matches TLDR's bin/lib/opencode-
-// agent.js, whose tests deliberately preserve it). Claude keeps the array as-is.
+// Sanitize Claude-Code agent frontmatter when writing eapcrew agents into
+// opencode. Two Claude-isms break opencode, so both are dropped:
+//   • `tools: [Read, Grep, …]` — a YAML array. opencode wants an object map (or
+//     the field omitted) and rejects the array; ONE such file invalidates the
+//     WHOLE opencode config, so nothing (MCP/skills/agents) loads.
+//   • `model: haiku` — an Anthropic alias. With no Anthropic provider authed in
+//     opencode, spawning the subagent fails ("Model not found: haiku/." —
+//     confirmed at runtime). Dropping it lets the subagent inherit opencode's
+//     default model and spawn.
+// Both are safe to omit — the agent prompt body still self-restricts behavior.
+// Claude Code keeps both (it honors the array and resolves the alias).
 function stripOpencodeAgentTools(content) {
   const FENCE = '---\n';
   if (typeof content !== 'string' || !content.startsWith(FENCE)) return content;
@@ -531,7 +535,7 @@ function stripOpencodeAgentTools(content) {
   let dropping = false;
   for (const line of fm.split('\n')) {
     if (dropping) { if (/^[ \t]/.test(line)) continue; dropping = false; }
-    if (/^tools[ \t]*:/.test(line)) { dropping = true; continue; }
+    if (/^(tools|model)[ \t]*:/.test(line)) { dropping = true; continue; }
     out.push(line);
   }
   return FENCE + out.join('\n') + rest;
