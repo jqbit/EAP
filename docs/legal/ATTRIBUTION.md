@@ -1,7 +1,7 @@
 # Attribution & Provenance
 
 **EAP** (Efficient Agent Protocol) is an independent, MIT-licensed project
-maintained solely by [ZeroPointNineBar](https://github.com/0point9bar). It is a self-contained
+maintained solely by [ZeroPointNineBar](https://github.com/0p9b). It is a self-contained
 hard fork/freeze with no upstream runtime dependency. This file records the
 lineage of every idea and every line of third-party code, per layer.
 
@@ -18,7 +18,7 @@ EAP-Signal's user-facing suite (skills, eapcrew agents, commands,
 substantial MIT code from TLDR (preferred) and caveman (second); notices in
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
-- **TLDR** — https://github.com/0point9bar/TLDR — MIT, © ZeroPointNineBar.
+- **TLDR** — https://github.com/0p9b/TLDR — MIT, © ZeroPointNineBar.
 - **caveman** — https://github.com/JuliusBrussee/caveman — MIT, © 2026 Julius Brussee.
 - **ponytail** by Dietrich Gebert — https://github.com/DietrichGebert/ponytail — MIT.
   EAP-Lean (`layers/eap-lean/`) is a **concept-derived, clean-room code-brevity

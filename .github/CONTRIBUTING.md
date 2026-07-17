@@ -5,7 +5,7 @@ compresses an AI coding agent's tokens at all three membranes of the token
 lifecycle — input, working, and output — as one self-contained, honest,
 zero-dependency product.
 
-EAP is the "parent" build-out of the [TLDR](https://github.com/0point9bar/TLDR)
+EAP is the "parent" build-out of the [TLDR](https://github.com/0p9b/TLDR)
 philosophy: TLDR is the minimal-invasion output-only child; EAP embeds TLDR as
 its Signal layer and adds two more. Keep changes small and focused; a tight PR
 beats a big rewrite.

@@ -44,13 +44,13 @@ See `docs/ARCHITECTURE.md` for the full design and `EAP.md` for the protocol.
 **One line — macOS / Linux / Git Bash / WSL:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/0point9bar/EAP/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/0p9b/EAP/main/install.sh | bash
 ```
 
 **One line — Windows PowerShell:**
 
 ```powershell
-irm https://raw.githubusercontent.com/0point9bar/EAP/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/0p9b/EAP/main/install.ps1 | iex
 ```
 
 Either bootstrap checks git + Node ≥ 22, clones the repo, and launches an
@@ -59,7 +59,7 @@ which agents and which layers (Signal / Runtime / Context) to wire. The TUI
 reads from your terminal even through `curl | bash`. To skip the prompts in
 automation, append flags: `… | bash -s -- --only claude --non-interactive`.
 
-> The bare `curl`/`irm` one-liner requires the `0point9bar/EAP` repo to be **public**
+> The bare `curl`/`irm` one-liner requires the `0p9b/EAP` repo to be **public**
 > (raw URLs and anonymous `git clone` don't work on private repos). Until then,
 > clone it yourself and run the installer directly (below).
 
@@ -89,7 +89,7 @@ Also: `node bin/eap.mjs update` / `node bin/eap-install.mjs update`. Slash
 (Claude + every native host with a skills dir, when runtime skills are on).
 
 Checkout resolution: `$EAP_HOME` → `~/.eap/src` → this repo if it is an EAP git
-checkout → else clone `https://github.com/0point9bar/EAP.git` to `~/.eap/src`.
+checkout → else clone `https://github.com/0p9b/EAP.git` to `~/.eap/src`.
 After git refresh, re-runs `eap-install --non-interactive` and writes
 `~/.eap/install-state.json`. MCP `eap_upgrade` stays plan-only without checksums;
 the CLI applies because you typed `eap update`.

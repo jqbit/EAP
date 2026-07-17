@@ -53,7 +53,7 @@ suite under `layers/eap-signal/` (skills, eapcrew agents, commands,
 `src/hooks/eap-signal-stats.mjs`, `src/hooks/eapcrew-model-overrides.mjs`)
 adapts substantial TLDR and caveman source. Notices retained:
 
-- Project: `TLDR` — Author: ZeroPointNineBar — https://github.com/0point9bar/TLDR
+- Project: `TLDR` — Author: ZeroPointNineBar — https://github.com/0p9b/TLDR
 - Project: `caveman` — Author: Julius Brussee — https://github.com/JuliusBrussee/caveman
 
 ```

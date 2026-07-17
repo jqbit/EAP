@@ -4,10 +4,10 @@
   "description": "EAP-Signal — verdict-first output compression for Claude Code.",
   "author": {
     "name": "ZeroPointNineBar",
-    "url": "https://github.com/0point9bar"
+    "url": "https://github.com/0p9b"
   },
-  "homepage": "https://github.com/0point9bar/EAP",
-  "repository": "https://github.com/0point9bar/EAP",
+  "homepage": "https://github.com/0p9b/EAP",
+  "repository": "https://github.com/0p9b/EAP",
   "license": "MIT",
   "skills": "./skills/"
 }

@@ -20,7 +20,7 @@ import {
   resolveReleaseTag,
 } from '../../layers/eap-runtime/src/upgrade.mjs';
 
-export const CLONE_URL = 'https://github.com/0point9bar/EAP.git';
+export const CLONE_URL = 'https://github.com/0p9b/EAP.git';
 export const REMOTE = 'origin';
 
 const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._\-\/]*$/;
@@ -66,7 +66,7 @@ export function isEapCheckout(root, {
   if (readPackageName(root, { readFileSync: read }) === 'eap-protocol') return true;
   try {
     const remotes = exec('git', ['remote', '-v'], { cwd: root });
-    return /0point9bar\/EAP(\.git)?\b/i.test(remotes);
+    return /0p9b\/EAP(\.git)?\b/i.test(remotes);
   } catch { return false; }
 }
 

@@ -27,7 +27,7 @@ Also: `node bin/eap.mjs update …` or `node bin/eap-install.mjs update …`.
 
 Slash command: `/eap-update`. Skill: `eap-update`.
 
-This fetches from GitHub `0point9bar/EAP`, refreshes the checkout, records
+This fetches from GitHub `0p9b/EAP`, refreshes the checkout, records
 `~/.eap/install-state.json`, and runs `eap-install --non-interactive`.
 
 ## Manual apply (optional)

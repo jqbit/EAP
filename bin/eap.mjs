@@ -34,7 +34,7 @@ USAGE
   eap <command> [args]
 
 COMMANDS
-  update [opts]     Fetch GitHub 0point9bar/EAP, refresh checkout, re-run installer
+  update [opts]     Fetch GitHub 0p9b/EAP, refresh checkout, re-run installer
   install [flags]   Wire EAP layers into your agent(s)  (→ eap-install)
   uninstall [flags] Remove EAP wiring                   (→ eap-install --uninstall)
   list              Provider matrix                     (→ eap-install --list)
